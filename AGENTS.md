@@ -228,3 +228,11 @@
   - 全套 74 項，13 項 error 仍然只是缺 igus_ws。
 - 尚未實機驗證：筆電端的 sender、Tailscale 的延遲，以及主機防火牆（ufw）是否放行 UDP 47710。
 
+
+### P0 實測：Quest → 筆電 CloudXR → Tailscale → 主機（2026-10-21，Claude + 使用者）
+
+- 架構：筆電（ASUS TUF，Tailscale 100.91.9.78）執行 `~/Documents/Jonathan/robot_remote_openarm`，它的 `.venv_quest` 是連到 Patrick 版本環境的 symlink；Quest 連筆電的 CloudXR；主機（100.89.140.123）用 `quest_probe.py --source udp://0.0.0.0:47710` 接收。
+- 連線：兩次合計約 1.7 萬個封包，**0 遺失**；兩手 pose 更新 57–59 Hz；最後一筆封包都在 15 ms 內。squeeze 和 trigger 都能到 0–1；A、B、X、Y 四個按鍵都收到。靜止時抖動 1–2 mm。
+- 頭盔不需要戴，但它是控制器的追蹤器：控制器必須在頭盔相機的視野內，而且頭盔休眠時兩手都會變成 not tracked。第一次把頭盔從頭上拿下來改放到胸口時，追蹤就一直沒恢復。
+- 方向：往上 z +32 cm ✓；往前是 x +23 cm 加上 y −11 cm；往左是 y +14 cm 加上 x +7 cm。也就是說三個方向的正負號都對，但前後左右兩次測試都有約 **26° 的偏角**，頭盔換了位置也一樣。長按 Meta 鍵重新置中後偏角仍在，推測這個參考方向跟 guardian / stage 有關。補償方式：teleop 加 `--yaw-deg 26`，但每次換房間或重設 guardian 都要重新確認。
+- 結論：P0 通過。
