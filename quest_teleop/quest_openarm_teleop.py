@@ -160,6 +160,15 @@ class OpenArmTeleop(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         self.cmd_pub[side].publish(msg)
 
+    def gripper_open_fraction(self) -> dict:
+        """{side: 0 (closed command) .. 1 (open command)} for the operator view."""
+        out = {}
+        for side, cmd in self.grip_cmd.items():
+            sd = self.sides[side]
+            span = sd.gripper_open - sd.gripper_closed
+            out[side] = None if cmd is None or span == 0 else round(float((cmd - sd.gripper_closed) / span), 3)
+        return out
+
     def update_gripper(self, side, trigger):
         """Soft pickup: hold the current command until the trigger reaches it, then follow the trigger."""
         sd = self.sides[side]
@@ -300,7 +309,7 @@ def run(node, args, xr):
                 node.send(side)
             node.state_pub.publish(String(data=json.dumps(
                 {s: ("engaged" if a.engaged else "tracked" if tracked[s] else "lost") for s, a in node.arms.items()}
-                | {"capturing": capture.capturing})))
+                | {"capturing": capture.capturing, "gripper": node.gripper_open_fraction()})))
             # buttons (rising edges): A/X capture toggle, B discard, Y end the attempt
             for h, (prim, sec) in xr.buttons.items():
                 was_p, was_s = last_buttons.get(h, (False, False))
