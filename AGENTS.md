@@ -236,3 +236,13 @@
 - 頭盔不需要戴，但它是控制器的追蹤器：控制器必須在頭盔相機的視野內，而且頭盔休眠時兩手都會變成 not tracked。第一次把頭盔從頭上拿下來改放到胸口時，追蹤就一直沒恢復。
 - 方向：往上 z +32 cm ✓；往前是 x +23 cm 加上 y −11 cm；往左是 y +14 cm 加上 x +7 cm。也就是說三個方向的正負號都對，但前後左右兩次測試都有約 **26° 的偏角**，頭盔換了位置也一樣。長按 Meta 鍵重新置中後偏角仍在，推測這個參考方向跟 guardian / stage 有關。補償方式：teleop 加 `--yaw-deg 26`，但每次換房間或重設 guardian 都要重新確認。
 - 結論：P0 通過。
+
+### P2 程式（2026-10-21，Claude；使用者決定：每個物件收 20 筆完整示範，不做修正片段）
+
+- robot_remote（`f9e7dad`）：teleop 新增 `--end-on-success-topic`，收到 `{"succeeded": true}` 時結束錄製和這個 attempt；按 B 時先寫 `teleop_discard.json` 再結束錄製；每個 attempt 只允許一段錄製；啟動時先等 `capture.fifo` 出現。ROS 測試 5 項，涵蓋 Y 結束、UDP、自動成功、B 放棄、只能錄一段。
+- ITRI（分支 `feat/held-tote-teleop`，worktree `.claude/worktrees/held-tote-teleop`，`7b3e6ad`，從 main 分出）：
+  - `scripts/vla/run_held_tote_teleop.py`：runner。
+  - `scripts/vla/held_tote_teleop_monitor.py`：判定物件是否在箱緣上方 2 cm 維持 2 s，並寫 `measurements.json`。
+  - `config/tote_pick/held_tote_teleop_v1.json`：每個物件配額 20 筆，seed 從 99000000 開始，輸出到 DATA/held-tote-pick/teleop，`--yaw-deg 26`。
+  - 測試 12 項，含 monitor 的 ROS 煙霧測試。
+- 尚未在 Isaac 上試跑。從 worktree 試跑前，要先建 `ros2_ws/install` 指向主 checkout install 的 symlink。left teacher 有 300 s 的牆鐘時限，所以操作預算設 200 s。
