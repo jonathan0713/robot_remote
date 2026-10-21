@@ -129,6 +129,7 @@ def main(argv=None):
     window = "Quest teleop - operator view"
     cv2.namedWindow(window, cv2.WINDOW_NORMAL)
     extra = None  # key of the extra tile shown in the free fourth slot
+    opened = time.monotonic()
     try:
         while rclpy.ok():
             t0 = time.monotonic()
@@ -145,7 +146,10 @@ def main(argv=None):
                 canvas = cv2.resize(canvas, None, fx=args.scale, fy=args.scale)
             cv2.imshow(window, canvas)
             key = cv2.waitKey(max(1, int(1000 / args.hz - (time.monotonic() - t0) * 1000))) & 0xFF
-            if key == ord("q") or cv2.getWindowProperty(window, cv2.WND_PROP_VISIBLE) < 1:
+            # Closed by its title bar: VISIBLE is 0. OpenCV 4.5 GTK builds report -1 (not supported) all the time and a
+            # GTK window reads 0 until it is mapped, so -1 never counts and 0 only after 2 s; q always quits.
+            closed = time.monotonic() - opened > 2.0 and cv2.getWindowProperty(window, cv2.WND_PROP_VISIBLE) == 0
+            if key == ord("q") or closed:
                 break
             if key in EXTRA_TILES:
                 extra = None if extra == key else key
