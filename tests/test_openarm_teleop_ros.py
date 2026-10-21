@@ -169,7 +169,11 @@ class OpenArmTeleopRosTest(unittest.TestCase):
     def test_only_one_capture_per_attempt(self):
         self.run_session(quest_over_udp=False, ending="a_thrice")
 
-    def run_session(self, quest_over_udp, ending="y", monitor_after_s=None):
+    def test_profile_operator_defaults_half_scale_and_a_toggled_gripper(self):
+        """The OpenArm profile's operator defaults: 10 cm of hand = 5 cm of TCP; one trigger pull closes the gripper."""
+        self.run_session(quest_over_udp=False, operator_defaults=True)
+
+    def run_session(self, quest_over_udp, ending="y", monitor_after_s=None, operator_defaults=False):
         profile = load_profile("openarm_dual_gripper")
         right = profile.sides["right"]
         isaac = FakeIsaac(profile, monitor_after_s)
@@ -186,6 +190,8 @@ class OpenArmTeleopRosTest(unittest.TestCase):
             th = threading.Thread(target=reader, daemon=True)
             th.start()
             argv = ["--arms", "right", "--run-dir", str(run_dir), "--max-run-s", "30"]
+            if not operator_defaults:
+                argv += ["--scale", "1", "--rot-scale", "1", "--gripper-mode", "analog"]
             if monitor_after_s is not None:
                 argv += ["--end-on-success-topic", "/held_tote_teleop/status"]
             sender = None
@@ -230,11 +236,13 @@ class OpenArmTeleopRosTest(unittest.TestCase):
         # 10 cm forward with the hand -> 10 cm forward with the TCP (openarm_body_link +x)
         q_end = np.array([cmds[-1][j] for j in right.joints])
         d = right.chain.fk(q_end)[:3, 3] - right.chain.fk(right.rest)[:3, 3]
-        np.testing.assert_allclose(d, [0.1, 0.0, 0.0], atol=2e-3)
+        np.testing.assert_allclose(d, [0.05 if operator_defaults else 0.1, 0.0, 0.0], atol=2e-3)
         # trigger 0 -> 1 closed the gripper from 0.040 to 0.0
         grip = [c[right.gripper_joints[0]] for c in cmds]
         self.assertAlmostEqual(grip[0], right.gripper_open)
         self.assertAlmostEqual(grip[-1], right.gripper_closed, places=4)
+        if operator_defaults:  # toggle: open or closed, never in between
+            self.assertEqual({round(g, 6) for g in grip}, {right.gripper_open, right.gripper_closed})
 
 
 if __name__ == "__main__":

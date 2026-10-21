@@ -179,6 +179,18 @@ class ArmTeleopTest(unittest.TestCase):
         self.assertAlmostEqual(np.rad2deg(r.magnitude()), 20.0, delta=0.5)
         np.testing.assert_allclose(r.as_rotvec() / r.magnitude(), self.side.tool_out_axis, atol=0.02)
 
+    def test_rot_scale_turns_the_tool_a_fraction_of_the_hand(self):
+        arm = ArmTeleop(self.side.chain, TeleopLimits(max_joint_vel=1.0, max_lin_vel=0.25, max_reach=0.62, rot_scale=0.5),
+                        tool_axis=self.side.tool_out_axis, q_rest=self.side.rest, posture_gain=0.05)
+        arm.engage(self.side.rest, self.pos, self.quat)
+        twist = np.array(arm.ctrl_twist_axis) / np.linalg.norm(arm.ctrl_twist_axis)
+        quat = (Rotation.from_quat(self.quat) * Rotation.from_rotvec(np.deg2rad(20) * twist)).as_quat()
+        for _ in range(90):
+            q = arm.step(self.pos, quat)
+        t = self.side.chain.fk(q)
+        r = Rotation.from_matrix(self.t0[:3, :3]).inv() * Rotation.from_matrix(t[:3, :3])
+        self.assertAlmostEqual(np.rad2deg(r.magnitude()), 10.0, delta=0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

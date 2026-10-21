@@ -36,6 +36,11 @@ def tool_from_controller(r_tool: Rotation, twist_axis_ctrl, right_ctrl, right_ba
     return Rotation.from_matrix(f_basis @ e_basis.T)
 
 
+def scaled(r: Rotation, k: float) -> Rotation:
+    """The same axis, k times the angle."""
+    return r if k == 1.0 else Rotation.from_rotvec(k * r.as_rotvec())
+
+
 @dataclass
 class TeleopLimits:
     rate: float = 30.0            # control loop [Hz]
@@ -46,6 +51,7 @@ class TeleopLimits:
     max_lead_deg: float = 15.0
     max_reach: float = 0.55       # target clamp around the shoulder [m]
     scale: float = 1.0            # hand -> TCP translation scale
+    rot_scale: float = 1.0        # hand -> tool rotation scale (fraction of the hand's rotation angle)
 
 
 class ArmTeleop:
@@ -98,10 +104,10 @@ class ArmTeleop:
         if self.rot_frame == "tool":
             # rotation of the controller about its OWN axes since engage, re-expressed on the tool's own axes and
             # applied on the tool side (right-multiplied)
-            d_local = self.origin_q.inv() * Rotation.from_quat(quat)
+            d_local = scaled(self.origin_q.inv() * Rotation.from_quat(quat), self.lim.rot_scale)
             r_des = self.home_r * (self.m_tool_ctrl * d_local * self.m_tool_ctrl.inv())
         else:
-            r_des = (r_b * self.origin_r.inv()) * self.home_r
+            r_des = scaled(r_b * self.origin_r.inv(), self.lim.rot_scale) * self.home_r
         return p_des, r_des
 
     def step(self, pos, quat):

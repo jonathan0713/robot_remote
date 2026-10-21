@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Operator view for the Quest teleop: camera topics tiled in one window, with the teleop and pick status.
 
-Defaults are the OpenArm held-tote ones (the operator's choice, 2026-10-21): the chest D435 and the two
-operator-only side cameras (ITRI run_tote_pick_scene.py --operator-cameras), the fourth tile free, and a status bar
+Defaults are the OpenArm held-tote ones (the operator's choice, 2026-10-21): the chest D435, the two operator-only
+side cameras (ITRI run_tote_pick_scene.py --operator-cameras) and the right wrist (for the final alignment), and a
+status bar
 from /quest_teleop/state (arm engaged / tracked / lost, gripper opening, recording) and /held_tote_teleop/status
 (item over the rim, hold time). Run it on the machine the operator watches (Moonlight shows its desktop), with the
 chain's ROS environment.
 
   source /opt/ros/humble/setup.bash
-  python3 quest_teleop/operator_view.py            # keys: w = right wrist in the fourth tile, l = left wrist, q = quit
+  python3 quest_teleop/operator_view.py            # keys: l = left wrist in place of the right wrist, q = quit
 
 A tile shows "no image" until its topic publishes, and turns grey with its age when it goes stale.
 """
@@ -20,8 +21,8 @@ import time
 import numpy as np
 
 DEFAULT_TILES = [("chest", "/camera_center/rgb"), ("left side", "/operator/side_left/rgb"),
-                 ("right side", "/operator/side_right/rgb")]
-EXTRA_TILES = {ord("w"): ("right wrist", "/camera_right_hand/rgb"), ord("l"): ("left wrist", "/camera_left_hand/rgb")}
+                 ("right side", "/operator/side_right/rgb"), ("right wrist", "/camera_right_hand/rgb")]
+EXTRA_TILES = {ord("l"): ("left wrist", "/camera_left_hand/rgb")}
 
 
 def image_to_bgr(msg) -> np.ndarray | None:
@@ -137,7 +138,7 @@ def main(argv=None):
             for _ in range(20):  # drain queued callbacks without blocking the window
                 rclpy.spin_once(node, timeout_sec=0.0)
             shown = (list(tiles) + [(None, None)] * 4)[:4]
-            if extra is not None and shown[3][1] is None:
+            if extra is not None:
                 shown[3] = EXTRA_TILES[extra]
             now = time.monotonic()
             canvas = compose(shown, frames, stamps, status_lines(status["state"], status["pick"], now,

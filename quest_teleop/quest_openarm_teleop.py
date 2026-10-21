@@ -8,8 +8,10 @@ Each driven arm publishes its joints + gripper on its own command topic (robot p
 config/robots/openarm_dual_gripper.json) every tick; the chain flow's joint_command_mux.py merges them into
 Isaac's /joint_command. Arms that are not driven get no command at all (the left-arm tote teacher keeps them).
 
-Per hand: hold SQUEEZE to move that arm, release to freeze it; TRIGGER closes its gripper. The gripper only follows
-the trigger once the trigger has come within --grip-pickup of the current gripper command (no jump on start).
+Per hand: hold SQUEEZE to move that arm, release to freeze it. TRIGGER drives its gripper: --gripper-mode toggle (the
+OpenArm profile's default) closes or opens it on each pull; analog closes it as far as the trigger is pulled, and
+follows only once the trigger has come within --grip-pickup of the current command (no jump on start). Hand motion
+is scaled by --scale / --rot-scale (profile defaults 0.5).
 
 Held-tote chain (--run-dir <run_dir> of run_tote_chain_flow.sh with TOTE_CHAIN_ASSIST=1 TOTE_CHAIN_RECORD=1):
   A or X       start / end the pick capture (one byte on <run_dir>/capture.fifo each)
@@ -90,7 +92,7 @@ class OpenArmTeleop(Node):
                               max_lin_vel=args.max_lin_vel or lim["max_lin_vel"],
                               max_rot_vel_deg=args.max_rot_vel or lim["max_rot_vel_deg"],
                               max_lead_m=lim["max_lead_m"], max_lead_deg=lim["max_lead_deg"],
-                              max_reach=lim["max_reach"], scale=args.scale)
+                              max_reach=lim["max_reach"], scale=args.scale, rot_scale=args.rot_scale)
         gain = profile.ik["posture_gain"] if args.posture_gain is None else args.posture_gain
         self.sides = {s: profile.sides[s] for s in SIDES}
         self.arms = {s: ArmTeleop(profile.sides[s].chain, limits, yaw_deg=args.yaw_deg,
@@ -101,6 +103,7 @@ class OpenArmTeleop(Node):
         self.grip_cmd = {s: None for s in args.arms}
         self.grip_meas = {}                             # measured gripper joint of the driven arms
         self.grip_live = {s: False for s in args.arms}  # gripper follows the trigger (after pickup)
+        self.trigger_armed = {s: False for s in args.arms}  # toggle mode: trigger seen released since the last pull
         self.seed = {}                                  # last /joint_command values (initial command)
         self.cmd_pub = {s: self.create_publisher(JointState, profile.sides[s].command_topic, 10) for s in args.arms}
         self.event_pub = self.create_publisher(String, "/quest_teleop/events", 10)
@@ -170,10 +173,21 @@ class OpenArmTeleop(Node):
         return out
 
     def update_gripper(self, side, trigger):
-        """Soft pickup: hold the current command until the trigger reaches it, then follow the trigger."""
+        """toggle: each pull (above 0.7, after a release below 0.3) closes an open gripper / opens a closed one.
+        analog: soft pickup, hold the current command until the trigger reaches it, then follow the trigger."""
         sd = self.sides[side]
         want = sd.gripper_position(trigger)
         if self.args.no_gripper:
+            return
+        if self.args.gripper_mode == "toggle":
+            if trigger < 0.3:
+                self.trigger_armed[side] = True
+            elif trigger > 0.7 and self.trigger_armed[side]:
+                self.trigger_armed[side] = False
+                middle = 0.5 * (sd.gripper_open + sd.gripper_closed)
+                closing = abs(self.grip_cmd[side] - sd.gripper_closed) > abs(middle - sd.gripper_closed)
+                self.grip_cmd[side] = sd.gripper_closed if closing else sd.gripper_open
+                self.get_logger().info(f"[{side}] gripper {'CLOSE' if closing else 'OPEN'}")
             return
         if not self.grip_live[side]:
             span = abs(sd.gripper_open - sd.gripper_closed)
@@ -210,7 +224,11 @@ def parse_args(argv=None):
     p.add_argument("--yaw-deg", type=float, default=0.0,
                    help="rotation about Z from the operator frame (X fwd, Y left, Z up) to openarm_body_link; "
                         "0 = you face the way the robot faces (pushing forward reaches into the shelf)")
-    p.add_argument("--scale", type=float, default=1.0, help="hand -> TCP translation scale")
+    p.add_argument("--scale", type=float, help="hand -> TCP translation scale (default: profile operator.scale, else 1)")
+    p.add_argument("--rot-scale", type=float,
+                   help="hand -> tool rotation scale (default: profile operator.rot_scale, else 1)")
+    p.add_argument("--gripper-mode", choices=["toggle", "analog"],
+                   help="toggle = each trigger pull closes / opens; analog = trigger depth (default: profile, else analog)")
     p.add_argument("--rate", type=float, default=30.0)
     p.add_argument("--max-joint-vel", type=float, help="rad/s (default: profile)")
     p.add_argument("--max-lin-vel", type=float, help="TCP speed [m/s] (default: profile)")
@@ -240,8 +258,8 @@ def parse_args(argv=None):
     args, ros_args = p.parse_known_args(argv)
     if len(set(args.arms)) != len(args.arms):
         p.error("--arms must not contain duplicates")
-    for key in ("rate", "scale", "min_arm_dist", "link_radius", "tool_radius"):
-        if not np.isfinite(getattr(args, key)) or getattr(args, key) <= 0:
+    for key in ("rate", "min_arm_dist", "link_radius", "tool_radius", "scale", "rot_scale"):
+        if getattr(args, key) is not None and (not np.isfinite(getattr(args, key)) or getattr(args, key) <= 0):
             p.error(f"--{key.replace('_', '-')} must be finite and positive")
     return args, ros_args
 
@@ -348,6 +366,10 @@ def run(node, args, xr):
 def main(argv=None):
     args, ros_args = parse_args(argv)
     profile = load_profile(args.profile)
+    defaults = {"scale": 1.0, "rot_scale": 1.0, "gripper_mode": "analog", **(profile.operator or {})}
+    for key in ("scale", "rot_scale", "gripper_mode"):
+        if getattr(args, key) is None:
+            setattr(args, key, defaults[key])
     rclpy.init(args=ros_args)
     signal.signal(signal.SIGTERM, signal.default_int_handler)  # abort during start-up
     node = OpenArmTeleop(args, profile)

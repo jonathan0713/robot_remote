@@ -56,6 +56,7 @@ class RobotProfile:
     limits: dict
     ik: dict
     sides: dict
+    operator: dict = None  # operator defaults (scale, rot_scale, gripper_mode); CLI flags override
 
 
 def load_profile(name_or_path) -> RobotProfile:
@@ -77,4 +78,5 @@ def load_profile(name_or_path) -> RobotProfile:
         sides[side] = Side(side, s["tip"], list(s["joints"]), np.asarray(s["tool_out_axis"], dtype=float),
                            list(g["joints"]), float(g["open"]), float(g["closed"]), s["command_topic"], rest, chain)
     return RobotProfile(data["name"], data["robot_type"], urdf_path, data["base_link"], data["state_topic"],
-                        data.get("cloudxr_app_name", "QuestTeleop"), dict(data["limits"]), dict(data["ik"]), sides)
+                        data.get("cloudxr_app_name", "QuestTeleop"), dict(data["limits"]), dict(data["ik"]), sides,
+                        dict(data.get("operator", {})))
