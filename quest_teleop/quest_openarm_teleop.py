@@ -107,6 +107,7 @@ class OpenArmTeleop(Node):
         self.grip_meas = {}                             # measured gripper joint of the driven arms
         self.grip_live = {s: False for s in args.arms}  # gripper follows the trigger (after pickup)
         self.trigger_armed = {s: False for s in args.arms}  # toggle mode: trigger seen released since the last pull
+        self.guard_state = {}
         self.seed = {}                                  # last /joint_command values (initial command)
         self.cmd_pub = {s: self.create_publisher(JointState, profile.sides[s].command_topic, 10) for s in args.arms}
         self.event_pub = self.create_publisher(String, "/quest_teleop/events", 10)
@@ -212,11 +213,19 @@ class OpenArmTeleop(Node):
         nxt = {s: cand.get(s, now[s]) for s in SIDES}
         d_now = clearance(caps("left", now["left"]), caps("right", now["right"]))
         d_next = clearance(caps("left", nxt["left"]), caps("right", nxt["right"]))
+        self.guard_state["clearance_m"] = round(float(d_now), 4)
         if d_next < a.min_arm_dist and d_next < d_now:
             self.get_logger().warning(f"arms {d_next * 100:.1f} cm apart (capsule surfaces) - holding",
                                       throttle_duration_sec=1.0)
+            self.guard_state["held_at"] = time.monotonic()
             return {}
         return cand
+
+    def guard_status(self) -> dict:
+        """For the operator view: the arms' clearance and whether the guard held a step in the last 0.5 s."""
+        held = time.monotonic() - self.guard_state.get("held_at", -1e9) < 0.5
+        return {"clearance_m": self.guard_state.get("clearance_m"), "holding": held,
+                "min_m": self.args.min_arm_dist}
 
 
 def parse_args(argv=None):
@@ -244,7 +253,8 @@ def parse_args(argv=None):
     p.add_argument("--grip-pickup", type=float, default=0.1,
                    help="the gripper follows the trigger once it is this fraction of the stroke from the command")
     p.add_argument("--no-gripper", action="store_true", help="never change the gripper command")
-    p.add_argument("--min-arm-dist", type=float, default=0.03, help="inter-arm guard: capsule surface clearance [m]")
+    p.add_argument("--min-arm-dist", type=float,
+                   help="inter-arm guard: capsule surface clearance [m] (default: profile operator.min_arm_dist, else 0.03)")
     p.add_argument("--link-radius", type=float, default=0.05)
     p.add_argument("--tool-radius", type=float, default=0.045)
     p.add_argument("--quest-source", default="cloudxr",
@@ -334,7 +344,8 @@ def run(node, args, xr):
                 node.send(side)
             node.state_pub.publish(String(data=json.dumps(
                 {s: ("engaged" if a.engaged else "tracked" if tracked[s] else "lost") for s, a in node.arms.items()}
-                | {"capturing": capture.capturing, "gripper": node.gripper_open_fraction()})))
+                | {"capturing": capture.capturing, "gripper": node.gripper_open_fraction(),
+                   "guard": node.guard_status()})))
             # buttons (rising edges): A/X capture toggle, B discard, Y end the attempt
             for h, (prim, sec) in xr.buttons.items():
                 was_p, was_s = last_buttons.get(h, (False, False))
@@ -377,8 +388,9 @@ def run(node, args, xr):
 def main(argv=None):
     args, ros_args = parse_args(argv)
     profile = load_profile(args.profile)
-    defaults = {"scale": 1.0, "rot_scale": 1.0, "gripper_mode": "analog", **(profile.operator or {})}
-    for key in ("scale", "rot_scale", "gripper_mode"):
+    defaults = {"scale": 1.0, "rot_scale": 1.0, "gripper_mode": "analog", "min_arm_dist": 0.03,
+                **(profile.operator or {})}
+    for key in ("scale", "rot_scale", "gripper_mode", "min_arm_dist"):
         if getattr(args, key) is None:
             setattr(args, key, defaults[key])
     rclpy.init(args=ros_args)

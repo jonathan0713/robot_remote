@@ -50,6 +50,10 @@ def status_lines(state: dict | None, pick: dict | None, now: float, state_t: flo
         recording = state.get("capturing")
         lines.append(("  ".join(arms) + ("   |   RECORDING" if recording else "   |   not recording (A = start)"),
                       (0, 0, 255) if recording else (255, 255, 255)))
+        guard = state.get("guard") or {}
+        if guard.get("holding"):
+            lines.append((f"GUARD: arms {guard['clearance_m'] * 100:.1f} cm apart - move the right hand away from the "
+                          "left arm (release and grip again)", (0, 0, 255)))
     if pick is not None and now - pick_t < 1.0 and pick.get("clearance_m") is not None:
         done = pick.get("succeeded")
         lines.append((f"item {pick['clearance_m'] * 100:+.1f} cm over the rim (need 2.0)   held "

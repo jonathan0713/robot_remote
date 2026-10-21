@@ -47,6 +47,8 @@ class OperatorViewTest(unittest.TestCase):
         self.assertIn("RECORDING", lines[0][0])
         self.assertIn("+3.1 cm over the rim", lines[1][0])
         self.assertIn("1.4 / 2.0 s", lines[1][0])
+        held = view.status_lines(dict(state, guard={"clearance_m": 0.008, "holding": True}), None, 10.0, 9.9, 0.0)
+        self.assertIn("GUARD: arms 0.8 cm apart", held[1][0])
         stale = view.status_lines(state, pick, now=10.0, state_t=5.0, pick_t=5.0)
         self.assertEqual(len(stale), 1)
         self.assertIn("no /quest_teleop/state", stale[0][0])
