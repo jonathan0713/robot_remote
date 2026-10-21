@@ -246,3 +246,9 @@
   - `config/tote_pick/held_tote_teleop_v1.json`：每個物件配額 20 筆，seed 從 99000000 開始，輸出到 DATA/held-tote-pick/teleop，`--yaw-deg 26`。
   - 測試 12 項，含 monitor 的 ROS 煙霧測試。
 - 尚未在 Isaac 上試跑。從 worktree 試跑前，要先建 `ros2_ws/install` 指向主 checkout install 的 symlink。left teacher 有 300 s 的牆鐘時限，所以操作預算設 200 s。
+
+### 操作者畫面與 served 流程（2026-10-21，Claude）
+
+- 使用者選定的操作畫面：胸口 D435，加上兩支只給操作者看的側面相機，即 `/operator/side_left/rgb` 和 `/operator/side_right/rgb`，從左右前方斜上往下看，不會被錄進資料集。這兩支相機由 ITRI `run_tote_pick_scene.py --operator-cameras config/tote_pick/operator_cameras_v1.json` 建立。視角是用 `scripts/analysis/operator_camera_check.py` 渲染出 v1–v5 五版後挑定的，圖檔在 DATA 的 held-tote-pick/operator-camera-check。`operator_view.py` 的第四格預設空著，按 w 顯示右腕相機、按 l 顯示左腕相機。
+- Isaac 主視窗預設從機器人頭部後上方往前看，讓畫面的前方和操作者的前方一致。
+- 收集流程改用最新版（使用者要求）：held-state bank（held-states-v1 的 train 分割）加上 v5 拉箱偏移，整個 round 只啟動一個 served Isaac。ITRI 分支 `feat/held-tote-teleop-served`（建在 `claude/isaac-persistent-reset-2f299c` 上，`c0363a4`）。served 搭配 ASSIST、served 搭配 GUI 這兩種組合都還沒實際跑過。
