@@ -43,6 +43,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from quest_arm_teleop import ARM_JOINTS, HOME_DEG, TCP_PRESETS, QuestController, SerialChain, step_toward
 from ethernet_rebel import DEFAULT_CONFIG, EthernetArms, RobotError, load_endpoints, watch_arm
 from arm_collision import DEFAULT_CALIBRATION, capsules, clearance, load_world_T_base
+from teleop_core import tool_from_controller
 
 HERE = Path(__file__).resolve().parent
 SIDES = ("left", "right")
@@ -130,27 +131,6 @@ def log_timing(log, line, bad):
         log.warning(line)
     else:
         log.info(line)
-
-
-def tool_from_controller(r_tool: Rotation, twist_axis_ctrl, right_ctrl, right_base) -> Rotation:
-    """Fixed-at-engage rotation M mapping controller-local axes onto tool-local axes:
-       controller twist axis (Quest handle long axis)      -> tool +Z (flange axis): twist hand = spin tool
-       'operator right' seen in the controller frame (at engage, orthogonalised)
-                                                            -> tool axis pointing to base 'right'
-                                                                                    : nod hand  = tilt tool
-    Using the operator-right direction measured at engage (instead of a fixed controller +X) keeps the
-    nod sense right for both hands, whatever the left/right OpenXR grip-frame conventions are."""
-    def basis(a3, a1):
-        e3 = np.asarray(a3, float) / np.linalg.norm(a3)
-        e1 = np.asarray(a1, float) - np.dot(a1, e3) * e3
-        if np.linalg.norm(e1) < 1e-3:  # degenerate: hand pointing sideways - fall back to any perpendicular
-            e1 = np.cross(e3, [0.0, 0.0, 1.0]) if abs(e3[2]) < 0.9 else np.cross(e3, [1.0, 0.0, 0.0])
-        e1 /= np.linalg.norm(e1)
-        return np.column_stack([e1, np.cross(e3, e1), e3])
-
-    e_basis = basis(twist_axis_ctrl, right_ctrl)
-    f_basis = basis([0.0, 0.0, 1.0], r_tool.inv().apply(right_base))
-    return Rotation.from_matrix(f_basis @ e_basis.T)
 
 
 def make_urdf() -> str:

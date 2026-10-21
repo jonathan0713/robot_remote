@@ -1,6 +1,6 @@
 # robot_remote → OpenArm（模擬）改造計畫
 
-狀態：草案，2026-10-21，Claude。分支 `feat/openarm-sim`。這份計畫只涵蓋模擬，實機後端（igus CRI / igus ROS driver）不動。
+狀態：P0 環境已裝、P1 完成（2026-10-21，Claude；進度見 `AGENTS.md`「P0 / P1 進度」）。分支 `feat/openarm-sim`。這份計畫只涵蓋模擬，實機後端（igus CRI / igus ROS driver）不動。
 
 ## 1. 目標與範圍
 

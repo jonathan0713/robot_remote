@@ -182,4 +182,32 @@
 
 - 使用者 fork（jonathan0713/robot_remote）後要改成遙控 ITRI_project 的 OpenArm 雙臂（7 軸 + 夾爪），先只做 Isaac Sim 5.1 模擬，可以大幅修改。計畫在 `docs/openarm_sim_port_plan.md`。
 - 方向：robot_remote 只負責 Quest → 關節命令，並加上 robot profile（ReBeL 和 OpenArm）；場景、錄製、匯入沿用 ITRI chain flow 的 `TOTE_CHAIN_ASSIST`（`/right_joint_command` + `capture.fifo`），資料格式和 held-tote v5 一致。
-- 目前狀態：只有計畫，尚未改程式、未安裝 `.venv_quest`、未啟動 Isaac 或 ROS。第 6 節的問題待使用者回覆。
+- 目前狀態（2026-10-21）：P0 環境已裝好，P1 完成；尚未啟動 Isaac，也沒有連過實際的 Quest。第 6 節的問題待使用者回覆。
+
+### P0 / P1 進度（2026-10-21，Claude）
+
+- P0：經使用者同意，`setup/install_quest_env.sh` 已建立 `.venv_quest`（isaacteleop 1.3.131、numpy 1.26.4、scipy 1.15.3，227 MB）。CloudXR EULA 尚未接受：第一次在終端機執行 `quest_probe.py` 時會出現連結並詢問 `[y/N]`，由使用者本人閱讀後回答。
+- `quest_probe.py` 已改寫：舊版依賴本機沒有的 `~/Robotic_infra/lerobot_isaac`。新版直接用 `quest_input.QuestController` 讀兩支控制器，不需要 ROS，也不需要機器人，每 5 s 印一次 pose 更新頻率和按鍵次數。
+- 拆出不依賴 ROS 的模組：
+  - `quest_teleop/kinematics.py`：`SerialChain` 改成 n 軸；不在 `joint_names` 裡的 revolute 關節視為 fixed；姿態任務只在每次呼叫的第一個 iteration 加入。
+  - `quest_teleop/quest_input.py`：`QuestController`，可指定 app_name。
+  - `quest_teleop/teleop_core.py`：`ArmTeleop`，內容是 run_session 的單臂數學；`tool_from_controller` 多了 `tool_axis` 參數。
+  - `quest_teleop/robot_profile.py` + `config/robots/openarm_dual_gripper.json`。
+  - `quest_arm_teleop.py` 與 `quest_dual_arm_teleop.py` 改為從這些模組 import，ReBeL 行為不變（6 軸 FK/Jacobian 完全相同，IK 差 2e-14）。`arm_collision.py` 改成延遲 import ReBeL 的 TCP 預設，並新增通用的 `link_capsules()`。
+- 新的 OpenArm teleop：`quest_teleop/quest_openarm_teleop.py`，用 `run_quest_openarm.sh` 啟動（套用 chain 的 ROS 環境：domain 42、fastrtps profile、不設 LOCALHOST_ONLY）。
+  - 每個 tick 只發布被驅動手臂的 `/<side>_joint_command`（7 軸 + finger_joint1）。
+  - 起始命令取 `/joint_command` 上最後的目標，避免下垂。
+  - 夾爪採軟接手：trigger 到達目前命令附近之後才開始跟隨。
+  - 兩臂膠囊 guard：未驅動的手臂用量測值。
+  - 按鍵：A/X 寫 `capture.fifo`，B 寫 `teleop_discard.json` 並 touch `release`，Y 只 touch `release`。
+  - 尚未實作：`measurements.json`（P2）。
+- 實測：
+  - OpenArm FK 與 TurboVLA `ArmKinematics` 相差 1e-15。
+  - 往外的工具軸方向：左臂是 ee_tcp 的 +Z，右臂是 −Z。
+  - ready → 箱內 → ready 的路徑：沒有姿態任務時，回到 ready 後關節漂移達 25°；姿態 gain 0.05 時漂移 ≤ 0.2°，目標誤差 0.1 mm / 0.00°，IK 每 tick 0.9 ms。
+  - held-tote 起始狀態的膠囊間距 0.087 m，與 ITRI sphere 模型一致。
+  - 從 j1 原點量的最大 reach 0.69 m，profile 的 max_reach 設 0.62 m。
+- 測試：
+  - 新增 `tests/test_openarm_kinematics.py`（10 項，純 numpy）和 `tests/test_openarm_teleop_ros.py`（1 項：假 Quest + 假 Isaac + FIFO，跑在隨機 ROS domain）。
+  - 全套 66 項中 13 項 error，全部是 `igus_rebel_description` 找不到（本機沒有 build igus_ws）。乾淨的 HEAD 匯出版本有相同的 13 項 error，所以不是這次修改造成的。
+- 下一步：使用者跑 `quest_probe.py`（P0 驗收）→ P2（ITRI 端的 `run_held_tote_teleop.py` glue 和 `measurements.json`；啟動 Isaac 前需使用者同意）。

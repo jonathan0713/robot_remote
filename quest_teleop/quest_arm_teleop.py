@@ -19,9 +19,7 @@ Needs the ros2_control stack running (dual_arm_sim/start_right_arm_moveit.sh or
 """
 
 import argparse
-import math
 import time
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -33,6 +31,9 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
+
+from kinematics import SerialChain, _origin, step_toward  # noqa: F401  (re-exported)
+from quest_input import OPERATOR_T_ANCHOR, QuestController  # noqa: F401  (re-exported)
 
 HERE = Path(__file__).resolve().parent
 ARM_JOINTS = [f"joint{i}" for i in range(1, 7)]
@@ -52,202 +53,6 @@ TCP_PRESETS = {
     "flange": (0.0, 0.0, 0.0527),
     "gripper": GRIPPER_TCP_IN_LINK6,
 }
-
-# OpenXR anchor (X right, Y up, Z backward) -> operator frame (X forward, Y left, Z up).
-OPERATOR_T_ANCHOR = np.array(
-    [[0.0, 0.0, -1.0, 0.0], [-1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]], dtype=np.float32
-)
-
-
-# ----------------------------------------------------------------------------- kinematics
-def _origin(el) -> np.ndarray:
-    t = np.eye(4)
-    o = el.find("origin")
-    if o is not None:
-        xyz = [float(v) for v in o.get("xyz", "0 0 0").split()]
-        rpy = [float(v) for v in o.get("rpy", "0 0 0").split()]
-        t[:3, :3] = Rotation.from_euler("xyz", rpy).as_matrix()
-        t[:3, 3] = xyz
-    return t
-
-
-def step_toward(q_from, q_to, max_dq):
-    """Move toward q_to by at most max_dq on the largest joint, scaling ALL joints uniformly.
-    Per-joint clipping bends the joint-space direction and made the TCP swing up to 15 cm
-    during fast wrist turns; uniform scaling keeps the IK's direction."""
-    dq = q_to - q_from
-    m = float(np.max(np.abs(dq)))
-    return q_from + (dq * (max_dq / m) if m > max_dq else dq)
-
-
-class SerialChain:
-    """Revolute/fixed chain base_link -> tip parsed from a URDF string, with FK + DLS IK."""
-
-    def __init__(self, urdf: str, base: str, tip: str, joint_names: list[str], tcp_xyz=None):
-        """tcp_xyz: optional translation [m] appended after `tip` (expressed in the tip frame)."""
-        root = ET.fromstring(urdf)
-        by_child = {j.find("child").get("link"): j for j in root.findall("joint")}
-        chain, link = [], tip
-        while link != base:
-            if link not in by_child:
-                raise ValueError(f"no path from {base} to {tip} in robot_description")
-            j = by_child[link]
-            chain.append(j)
-            link = j.find("parent").get("link")
-        chain.reverse()
-        self.elems = []  # (T_origin, axis or None, joint index)
-        self.lower, self.upper = np.full(6, -np.pi), np.full(6, np.pi)
-        for j in chain:
-            name, typ = j.get("name"), j.get("type")
-            if typ in ("revolute", "continuous"):
-                idx = joint_names.index(name)
-                axis = np.array([float(v) for v in (j.find("axis").get("xyz") if j.find("axis") is not None else "1 0 0").split()])
-                lim = j.find("limit")
-                if typ == "revolute" and lim is not None:
-                    self.lower[idx], self.upper[idx] = float(lim.get("lower")), float(lim.get("upper"))
-                self.elems.append((_origin(j), axis / np.linalg.norm(axis), idx))
-            elif typ == "fixed":
-                self.elems.append((_origin(j), None, None))
-            else:
-                raise ValueError(f"unsupported joint type {typ} ({name})")
-        if tcp_xyz is not None:
-            t_tcp = np.eye(4)
-            t_tcp[:3, 3] = tcp_xyz
-            self.elems.append((t_tcp, None, None))
-
-    def joint_origin(self, n: int) -> np.ndarray:
-        """Base-frame position of the n-th (0-based) revolute joint's origin (pose-independent for n<=1)."""
-        t, k = np.eye(4), 0
-        for t_o, axis, _ in self.elems:
-            t = t @ t_o
-            if axis is not None:
-                if k == n:
-                    return t[:3, 3].copy()
-                k += 1
-        raise IndexError(n)
-
-    def fk(self, q: np.ndarray, with_jacobian: bool = False):
-        t = np.eye(4)
-        axes, points = [], []
-        for t_o, axis, idx in self.elems:
-            t = t @ t_o
-            if axis is not None:
-                axes.append((idx, t[:3, :3] @ axis))
-                points.append(t[:3, 3].copy())
-                r = np.eye(4)
-                r[:3, :3] = Rotation.from_rotvec(axis * q[idx]).as_matrix()
-                t = t @ r
-        if not with_jacobian:
-            return t
-        jac = np.zeros((6, 6))
-        for (idx, z), p in zip(axes, points):
-            jac[:3, idx] = np.cross(z, t[:3, 3] - p)
-            jac[3:, idx] = z
-        return t, jac
-
-    def ik(self, q0, t_des, iters=30, damping=0.02, rot_weight=1.0, tol=1e-4):
-        """Task-priority DLS IK: position is the primary task, orientation is solved in the
-        null space of the position task. When the wrist cannot realise an orientation (e.g. a
-        joint at its limit) the position is kept and only the orientation is left short.
-        Joints sitting on a limit and pushed further into it are frozen for that iteration."""
-        q = q0.copy()
-        lam2 = damping**2
-        for _ in range(iters):
-            t, jac = self.fk(q, with_jacobian=True)
-            e_p = t_des[:3, 3] - t[:3, 3]
-            e_r = rot_weight * (Rotation.from_matrix(t_des[:3, :3]) * Rotation.from_matrix(t[:3, :3]).inv()).as_rotvec()
-            if np.linalg.norm(e_p) < tol and np.linalg.norm(e_r) < tol:
-                break
-            free = np.ones(6, dtype=bool)
-            for _pass in range(2):
-                jp, jr = jac[:3] * free, jac[3:] * free
-                jp_pinv = jp.T @ np.linalg.inv(jp @ jp.T + lam2 * np.eye(3))
-                dq1 = jp_pinv @ e_p
-                null = np.eye(6) - jp_pinv @ jp
-                jr_n = jr @ null
-                dq2 = null @ jr_n.T @ np.linalg.solve(jr_n @ jr_n.T + lam2 * np.eye(3), e_r - jr @ dq1)
-                dq = (dq1 + dq2) * free
-                blocked = ((q <= self.lower + 1e-6) & (dq < 0)) | ((q >= self.upper - 1e-6) & (dq > 0))
-                if not (blocked & free).any():
-                    break
-                free &= ~blocked
-            q = np.clip(q + dq, self.lower, self.upper)
-        return q
-
-
-# ----------------------------------------------------------------------------- XR input
-class QuestController:
-    """Raw grip pose / squeeze / trigger of Quest controllers via Isaac Teleop + CloudXR.
-
-    One CloudXR runtime + one TeleopSession per process (the runtime is a process-wide singleton),
-    so both hands must be read through the same instance."""
-
-    def __init__(self, hands, env_file: Path):
-        from isaacteleop.cloudxr import CloudXRLauncher
-        from isaacteleop.retargeting_engine.deviceio_source_nodes import ControllersSource
-        from isaacteleop.retargeting_engine.interface import (
-            ExecutionEvents, ExecutionState, OutputCombiner, TensorGroup, ValueInput,
-        )
-        from isaacteleop.retargeting_engine.tensor_types import TransformMatrix
-        from isaacteleop.retargeting_engine.tensor_types.indices import ControllerInputIndex
-        from isaacteleop.teleop_session_manager import TeleopSession, TeleopSessionConfig
-
-        self._idx = ControllerInputIndex
-        print("[quest] launching CloudXR runtime (~30 s) ...", flush=True)
-        self._launcher = CloudXRLauncher(install_dir=str(Path.home() / ".cloudxr"), env_config=str(env_file))
-        self.hands = [hands] if isinstance(hands, str) else list(hands)
-        self.buttons = {h: (False, False) for h in self.hands}
-        controllers = ControllersSource(name="controllers")
-        xform = ValueInput("operator_T_anchor", TransformMatrix())
-        transformed = controllers.transformed(xform.output("value"))
-        pipeline = OutputCombiner({h: transformed.output(f"controller_{h}") for h in self.hands})
-        tg = TensorGroup(TransformMatrix())
-        tg[0] = OPERATOR_T_ANCHOR
-        self._inputs = {"operator_T_anchor": {"value": tg}}
-        self._events = ExecutionEvents(execution_state=ExecutionState.RUNNING, reset=False)
-        self._session = TeleopSession(TeleopSessionConfig(app_name="QuestReBeL", pipeline=pipeline))
-        self._session.__enter__()
-
-    def read_all(self) -> dict:
-        """Step the session once -> {hand: (tracked, pos[3] operator frame, quat xyzw, squeeze, trigger)}"""
-        out = self._session.step(execution_events=self._events, external_inputs=self._inputs)
-        self.buttons = {h: self._buttons(out[h]) for h in self.hands}  # (primary A/X, secondary B/Y; dual-arm teleop: Y = scene reset)
-        return {h: self._parse(out[h]) for h in self.hands}
-
-    def _buttons(self, c):
-        if getattr(c, "is_none", False):
-            return False, False
-        try:
-            return float(c[self._idx.PRIMARY_CLICK]) > 0.5, float(c[self._idx.SECONDARY_CLICK]) > 0.5
-        except (IndexError, KeyError, TypeError, ValueError):
-            return False, False
-
-    def read(self):
-        """Single-hand convenience: the first hand's tuple."""
-        return self.read_all()[self.hands[0]]
-
-    def _parse(self, c):
-        if getattr(c, "is_none", False):
-            return False, None, None, 0.0, 0.0
-        try:
-            pos = np.asarray(c[self._idx.GRIP_POSITION], dtype=float)
-            quat = np.asarray(c[self._idx.GRIP_ORIENTATION], dtype=float)
-            squeeze, trigger = float(c[self._idx.SQUEEZE_VALUE]), float(c[self._idx.TRIGGER_VALUE])
-        except (IndexError, KeyError, TypeError, ValueError):
-            return False, None, None, 0.0, 0.0
-        # Right after the headset connects (and on tracking loss) the stream can carry an all-zero
-        # quaternion / non-finite pose. Treat that as "not tracked" instead of crashing.
-        if quat.shape != (4,) or not np.all(np.isfinite(quat)) or np.linalg.norm(quat) < 1e-6 \
-                or pos.shape != (3,) or not np.all(np.isfinite(pos)):
-            return False, None, None, 0.0, 0.0
-        return True, pos, quat / np.linalg.norm(quat), squeeze, trigger
-
-    def close(self):
-        try:
-            self._session.__exit__(None, None, None)
-        finally:
-            self._launcher.stop()
-
 
 # ----------------------------------------------------------------------------- node
 class QuestArmTeleop(Node):

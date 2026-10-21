@@ -1,0 +1,40 @@
+{
+  "name": "openarm_dual_gripper",
+  "description": "OpenArm bimanual (7-DoF arms, parallel grippers) in the ITRI_project Isaac Sim 5.1 held_tote_pick scene (isaac_save/main/Oct/1015.usd). Joint names, URDF and topics are those of the ITRI chain flow (scripts/vla/run_tote_chain_flow.sh).",
+  "robot_type": "openarm_dual_gripper",
+  "urdf": "${ITRI_PROJECT:-~/Documents/ITRI_project}/ros2_ws/src/openarm_dual_gripper_description/urdf/openarm_dual_gripper.urdf",
+  "base_link": "openarm_body_link",
+  "state_topic": "/isaac_joint_states",
+  "cloudxr_app_name": "QuestOpenArm",
+  "limits": {
+    "max_joint_vel": 1.0,
+    "max_lin_vel": 0.25,
+    "max_rot_vel_deg": 60.0,
+    "max_lead_m": 0.05,
+    "max_lead_deg": 15.0,
+    "max_reach": 0.62
+  },
+  "ik": {"rot_weight": 1.0, "posture_gain": 0.05},
+  "sides": {
+    "left": {
+      "tip": "openarm_left_ee_tcp",
+      "joints": ["openarm_left_joint1", "openarm_left_joint2", "openarm_left_joint3", "openarm_left_joint4",
+                 "openarm_left_joint5", "openarm_left_joint6", "openarm_left_joint7"],
+      "tool_out_axis": [0.0, 0.0, 1.0],
+      "gripper": {"joints": ["openarm_left_finger_joint1"], "open": 0.044, "closed": 0.0},
+      "command_topic": "/left_joint_command",
+      "rest": [0.1607, -2.7809, -0.3835, 2.3334, 0.0154, -0.5201, -0.5478],
+      "rest_source": "ITRI_project config/tote_pick/held_tote_start_v5.json left_arm.joints (held tote)"
+    },
+    "right": {
+      "tip": "openarm_right_ee_tcp",
+      "joints": ["openarm_right_joint1", "openarm_right_joint2", "openarm_right_joint3", "openarm_right_joint4",
+                 "openarm_right_joint5", "openarm_right_joint6", "openarm_right_joint7"],
+      "tool_out_axis": [0.0, 0.0, -1.0],
+      "gripper": {"joints": ["openarm_right_finger_joint1"], "open": 0.040, "closed": 0.0},
+      "command_topic": "/right_joint_command",
+      "rest": [-0.041146, 2.035242, 0.759658, 1.930547, -0.758908, -0.153640, 1.349915],
+      "rest_source": "ITRI_project config/tote_pick/held_tote_start_v5.json right_arm.joints (ready pose)"
+    }
+  }
+}

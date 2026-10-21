@@ -1,13 +1,12 @@
-#!/usr/bin/env python
-"""Quest controller probe: connect via Isaac Teleop / CloudXR and print the right controller
-state WITHOUT any robot attached. Use it to validate headset <-> workstation before driving SO101.
+#!/usr/bin/env python3
+"""Quest controller probe: connect through Isaac Teleop / CloudXR and print both controllers WITHOUT any robot or
+ROS. Use it to check the headset <-> workstation link before driving an arm.
 
-Run with the Isaac Teleop venv:
-  cd ~/Robotic_infra/lerobot_isaac && source .venv/bin/activate
-  python robot_remote/quest_probe.py
+  .venv_quest/bin/python quest_probe.py            # Ctrl+C to quit
 
-Prints grip position (already rebased into the robot base frame: +x forward, +y left, +z up),
-orientation (roll/pitch/yaw, deg), squeeze and trigger. Ctrl-C to quit.
+Per hand: grip position in the operator frame (x forward, y left, z up) and its change since tracking started
+[cm], orientation (roll / pitch / yaw, deg), squeeze, trigger, buttons (A/X = primary, B/Y = secondary). Every 5 s a
+[rate] line counts how often a fresh controller pose arrived (Hz) and the button presses seen so far.
 """
 
 import argparse
@@ -18,54 +17,72 @@ from pathlib import Path
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-LEROBOT_ISAAC = Path.home() / "Robotic_infra" / "lerobot_isaac"
-sys.path.insert(0, str(LEROBOT_ISAAC))  # makes the `examples` package importable
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE / "quest_teleop"))
+from quest_input import QuestController  # noqa: E402
 
-from examples.isaac_teleop_to_so101.isaac_teleop import XRController, XRControllerConfig  # noqa: E402
-
-DEFAULT_ENV = LEROBOT_ISAAC / "examples" / "isaac_teleop_to_so101" / "default.env"
+BUTTON_NAMES = {"left": ("X", "Y"), "right": ("A", "B")}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--hand", choices=["left", "right"], default="right")
+    parser.add_argument("--hands", nargs="+", choices=["left", "right"], default=["left", "right"])
     parser.add_argument("--hz", type=float, default=5.0, help="print rate")
+    parser.add_argument("--read-hz", type=float, default=60.0, help="controller read rate")
     args = parser.parse_args()
 
-    teleop = XRController(XRControllerConfig(hand_side=args.hand, cloudxr_env_file=str(DEFAULT_ENV)))
-    print("Starting CloudXR runtime + session (~30 s) ...")
-    teleop.connect()
+    xr = QuestController(args.hands, HERE / "quest_teleop" / "cloudxr_quest3.env", app_name="QuestProbe")
+    print("CloudXR up. Quest Browser -> https://nvidia.github.io/IsaacTeleop/client/v1.3.131/ , Server IP = this PC, "
+          "accept the certificate, back, Connect.", flush=True)
+    origin = {h: None for h in args.hands}
+    last_pos = {h: None for h in args.hands}
+    fresh = {h: 0 for h in args.hands}
+    presses = {BUTTON_NAMES[h][i]: 0 for h in args.hands for i in (0, 1)}
+    prev_buttons = {h: (False, False) for h in args.hands}
+    t_print = t_rate = time.perf_counter()
     try:
-        print("Connected. Open the CloudXR web client in the Quest browser and press Connect.")
-        origin = None
-        last = 0.0
         while True:
-            a = teleop.get_action()
-            now = time.perf_counter()
-            if now - last < 1.0 / args.hz:
-                time.sleep(0.005)
-                continue
-            last = now
-            if not teleop.is_tracking:
-                print("\rwaiting for controller tracking ...                                  ", end="", flush=True)
-                origin = None
-                continue
-            pos = np.asarray(a["grip_pos"], dtype=float)
-            if origin is None:
-                origin = pos.copy()
-            rpy = Rotation.from_quat(np.asarray(a["grip_quat"], dtype=float)).as_euler("xyz", degrees=True)
-            d = (pos - origin) * 100
-            print(
-                f"\rpos[m]={np.round(pos, 3)}  d_from_start[cm]={np.round(d, 1)}  "
-                f"rpy[deg]={np.round(rpy, 0)}  squeeze={a['squeeze']:.2f}  trigger={a['trigger']:.2f}   ",
-                end="",
-                flush=True,
-            )
+            t0 = time.perf_counter()
+            readings = xr.read_all()
+            for h in args.hands:
+                ok, pos, _, _, _ = readings[h]
+                for i, (now, was) in enumerate(zip(xr.buttons[h], prev_buttons[h])):
+                    if now and not was:
+                        presses[BUTTON_NAMES[h][i]] += 1
+                prev_buttons[h] = xr.buttons[h]
+                if not ok:
+                    origin[h] = last_pos[h] = None
+                    continue
+                if origin[h] is None:
+                    origin[h] = pos.copy()
+                if last_pos[h] is None or np.any(pos != last_pos[h]):
+                    fresh[h] += 1
+                last_pos[h] = pos.copy()
+            if t0 - t_print >= 1.0 / args.hz:
+                t_print = t0
+                lines = []
+                for h in args.hands:
+                    ok, pos, quat, squeeze, trigger = readings[h]
+                    if not ok:
+                        lines.append(f"{h:5s}: not tracked")
+                        continue
+                    rpy = Rotation.from_quat(quat).as_euler("xyz", degrees=True)
+                    d = (pos - origin[h]) * 100
+                    b = "".join(n if on else "-" for n, on in zip(BUTTON_NAMES[h], xr.buttons[h]))
+                    lines.append(f"{h:5s}: pos {np.round(pos, 3)} d[cm] {np.round(d, 1)} rpy {np.round(rpy, 0)} "
+                                 f"squeeze {squeeze:.2f} trigger {trigger:.2f} buttons {b}")
+                print(" | ".join(lines), flush=True)
+            if t0 - t_rate >= 5.0:
+                hz = {h: fresh[h] / (t0 - t_rate) for h in args.hands}
+                print("[rate] fresh poses " + ", ".join(f"{h} {v:.0f} Hz" for h, v in hz.items())
+                      + f" | presses {presses}", flush=True)
+                fresh = {h: 0 for h in args.hands}
+                t_rate = t0
+            time.sleep(max(0.0, 1.0 / args.read_hz - (time.perf_counter() - t0)))
     except KeyboardInterrupt:
         pass
     finally:
-        print("\nDisconnecting ...")
-        teleop.disconnect()
+        xr.close()
 
 
 if __name__ == "__main__":

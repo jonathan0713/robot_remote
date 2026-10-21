@@ -1,5 +1,6 @@
-"""Inter-arm collision model: each ReBeL is a chain of capsules (segments with a radius) along its links and
+"""Inter-arm collision model: each arm is a chain of capsules (segments with a radius) along its links and
 tooling; the clearance between the two arms is the smallest surface-to-surface distance of any capsule pair.
+capsules() is the ReBeL model (flange, XEG-32, knife); link_capsules() works for any SerialChain.
 
 Arm bases are placed in one common frame: from the hand-eye calibrations (config/arm_calibration.json,
 camera_link in each base_link -> world = camera_link) on the real arms, or from the simulation USD poses.
@@ -10,8 +11,6 @@ from pathlib import Path
 
 import numpy as np
 from scipy.spatial.transform import Rotation
-
-from quest_arm_teleop import TCP_PRESETS
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CALIBRATION = ROOT / "config" / "arm_calibration.json"
@@ -31,6 +30,7 @@ def load_world_T_base(path=DEFAULT_CALIBRATION):
 
 def chain_points(chain, q):
     """Base-frame points along the arm: the six joint origins, then flange, XEG-32 jaw centre and knife tip."""
+    from quest_arm_teleop import TCP_PRESETS  # ReBeL only; imported here so this module needs no ROS
     t, pts = np.eye(4), []
     last = max(i for i, (_, axis, _) in enumerate(chain.elems) if axis is not None)
     for t_o, axis, idx in chain.elems[:last + 1]:  # up to link6; a control-point offset may follow
@@ -51,6 +51,24 @@ def capsules(chain, q, world_T_base, arm_radius, tool_radius):
                                                   for p in chain_points(chain, q))
     return [(j1, j2, arm_radius), (j2, j3, arm_radius), (j3, j4, arm_radius), (j4, j5, arm_radius),
             (j5, j6, arm_radius), (j6, flange, arm_radius), (flange, jaw, tool_radius), (flange, knife, tool_radius)]
+
+
+def link_capsules(chain, q, link_radius, tool_radius, world_T_base=None):
+    """[(p0, p1, radius)] in the world frame for any SerialChain: segments between consecutive joint origins
+    (link_radius), then last joint origin -> chain tip (TCP; tool_radius)."""
+    t, pts = np.eye(4), []
+    for t_o, axis, idx in chain.elems:
+        t = t @ t_o
+        if axis is not None:
+            pts.append(t[:3, 3].copy())
+            r = np.eye(4)
+            r[:3, :3] = Rotation.from_rotvec(axis * q[idx]).as_matrix()
+            t = t @ r
+    pts.append(t[:3, 3].copy())
+    if world_T_base is not None:
+        pts = [world_T_base[:3, :3] @ p + world_T_base[:3, 3] for p in pts]
+    caps = [(a, b, link_radius) for a, b in zip(pts[:-2], pts[1:-1])]
+    return caps + [(pts[-2], pts[-1], tool_radius)]
 
 
 def segment_distance(p1, q1, p2, q2):
