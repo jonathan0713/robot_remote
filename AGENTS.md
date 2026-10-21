@@ -177,3 +177,9 @@
 - 按鍵：A/X = 開始／儲存 episode，B = 丟棄，**Y（左手）= 重置場景**（原本 B/Y 都是丟棄）。GUI 執行頁另有「⟲ Reset scene (= Y)」按鈕（經 teleop stdin `reset_scene`）。
 - 重置（僅模擬）：送出 `reset` 事件（錄製中的 episode 由 record_dataset.py 丟棄）→ 兩臂放開、夾爪打開 → 以 0.4 rad/s 回到 HOME_DEG → 發布 `/dual_arm/reset_scene` 讓模擬關上四片蓋子（手臂離開後才關）→ 重新握持即可繼續。實機後端按 Y 只記錄警告，**不會因按鍵移動實體手臂**。
 - 驗證：新增整合測試（假 Isaac 跟隨命令、假 Quest 握持中按 Y）：握持被放開、`reset` 事件與 `/dual_arm/reset_scene` 各一次、手臂回到 home ±1°；55 項測試通過。未用實際頭盔試按。
+
+## OpenArm 模擬改造（2026-10-21，Claude；分支 `feat/openarm-sim`）
+
+- 使用者 fork（jonathan0713/robot_remote）後要改成遙控 ITRI_project 的 OpenArm 雙臂（7 軸 + 夾爪），先只做 Isaac Sim 5.1 模擬，可以大幅修改。計畫在 `docs/openarm_sim_port_plan.md`。
+- 方向：robot_remote 只負責 Quest → 關節命令，並加上 robot profile（ReBeL 和 OpenArm）；場景、錄製、匯入沿用 ITRI chain flow 的 `TOTE_CHAIN_ASSIST`（`/right_joint_command` + `capture.fifo`），資料格式和 held-tote v5 一致。
+- 目前狀態：只有計畫，尚未改程式、未安裝 `.venv_quest`、未啟動 Isaac 或 ROS。第 6 節的問題待使用者回覆。
