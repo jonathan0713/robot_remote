@@ -19,6 +19,9 @@ Held-tote chain (--run-dir <run_dir> of run_tote_chain_flow.sh with TOTE_CHAIN_A
   Y            end the attempt: end the capture, touch <run_dir>/release (the chain pushes the tote back)
 With --end-on-success-topic, a std_msgs/String JSON message {"succeeded": true} received during a capture ends the
 capture and the attempt by itself (the held-tote pick monitor: item held above the rim long enough).
+Practice (--no-capture, with --run-dir): nothing is recorded; A does nothing, Y = reset the same scene, B = a new
+scene, a success = a new scene. <run_dir>/teleop_end.json tells the runner which ({"reason": "end" | "new" |
+"success" | ...}); every attempt writes it.
 Without --run-dir the buttons are only published on /quest_teleop/events ("toggle", "discard", "end").
 
 Run with the ROS environment of the chain flow (ROS_DOMAIN_ID 42, rmw_fastrtps_cpp + its FastDDS profile; NOT
@@ -253,6 +256,8 @@ def parse_args(argv=None):
     p.add_argument("--max-run-s", type=float, default=0.0, help="end the attempt after this long (0 = no limit)")
     p.add_argument("--end-on-success-topic", default="",
                    help='std_msgs/String JSON topic; {"succeeded": true} during a capture ends the capture and attempt')
+    p.add_argument("--no-capture", action="store_true",
+                   help="practice: no capture control (nothing recorded); Y = reset, B = new scene, success = new scene")
     p.add_argument("--fifo-wait-s", type=float, default=60.0,
                    help="with --run-dir: wait this long at start for the chain's capture.fifo")
     args, ros_args = p.parse_known_args(argv)
@@ -267,6 +272,8 @@ def parse_args(argv=None):
 def end_attempt(node, capture, args, reason, discard=False):
     """End the open capture, mark a discard, release the tote (chain flow)."""
     log = node.get_logger()
+    if args.run_dir is not None:
+        (args.run_dir / "teleop_end.json").write_text(json.dumps({"reason": reason, "unix_s": time.time()}) + "\n")
     if args.run_dir is not None and discard:
         # before the capture end: the pick monitor reads it when the capture ends
         (args.run_dir / "teleop_discard.json").write_text(
@@ -281,7 +288,7 @@ def end_attempt(node, capture, args, reason, discard=False):
 def run(node, args, xr):
     log = node.get_logger()
     hand_of = {s: ({"left": "right", "right": "left"}[s] if args.swap_hands else s) for s in node.arms}
-    capture = CaptureControl(args.run_dir / "capture.fifo" if args.run_dir else None)
+    capture = CaptureControl(args.run_dir / "capture.fifo" if args.run_dir and not args.no_capture else None)
     dt = 1.0 / args.rate
     last_buttons, tracked = {}, {s: False for s in node.arms}
     stop = {"requested": False}
@@ -331,7 +338,9 @@ def run(node, args, xr):
             # buttons (rising edges): A/X capture toggle, B discard, Y end the attempt
             for h, (prim, sec) in xr.buttons.items():
                 was_p, was_s = last_buttons.get(h, (False, False))
-                if prim and not was_p:
+                if prim and not was_p and args.no_capture:
+                    log.warning(f"[{h} hand] practice: nothing is recorded (Y = reset, B = new scene)")
+                elif prim and not was_p:
                     try:
                         node.succeeded = False  # a success counts only within the capture it ends
                         sent = capture.toggle()
@@ -343,22 +352,24 @@ def run(node, args, xr):
                         log.error(str(exc))
                     node.event_pub.publish(String(data="toggle"))
                 if sec and not was_s:
-                    ev = "end" if h == "left" else "discard"
+                    ev = ("end" if h == "left" else "new" if args.no_capture else "discard")
                     node.event_pub.publish(String(data=ev))
                     if args.run_dir is not None:
                         ended = ev
                     log.warning(f"[{h} hand] {ev}")
                 last_buttons[h] = (prim, sec)
-            if node.succeeded and capture.capturing and ended is None:
+            if node.succeeded and (capture.capturing or args.no_capture) and ended is None:
                 ended = "success"
-                log.warning("pick succeeded (held above the rim) - ending the capture")
+                log.warning("PRACTICE SUCCESS - next scene" if args.no_capture else
+                            "pick succeeded (held above the rim) - ending the capture")
             if args.max_run_s and time.monotonic() - t_start > args.max_run_s and ended is None:
                 ended = "timeout"
             time.sleep(max(0.0, dt - (time.perf_counter() - t0)))
     finally:
         if args.run_dir is not None:
             reason = ended or "stopped"
-            end_attempt(node, capture, args, reason, discard=reason in ("discard", "stopped", "timeout"))
+            end_attempt(node, capture, args, reason,
+                        discard=not args.no_capture and reason in ("discard", "stopped", "timeout"))
         else:
             capture.close()
 

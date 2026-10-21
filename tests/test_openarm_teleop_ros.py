@@ -11,6 +11,7 @@ Runs on its own ROS domain, localhost only.
 import json
 import os
 import random
+import shutil
 import sys
 import tempfile
 import threading
@@ -173,14 +174,19 @@ class OpenArmTeleopRosTest(unittest.TestCase):
         """The OpenArm profile's operator defaults: 10 cm of hand = 5 cm of TCP; one trigger pull closes the gripper."""
         self.run_session(quest_over_udp=False, operator_defaults=True)
 
-    def run_session(self, quest_over_udp, ending="y", monitor_after_s=None, operator_defaults=False):
+    def test_practice_y_resets_and_b_asks_for_a_new_scene(self):
+        for ending, reason in (("y", "end"), ("b", "new")):
+            with self.subTest(ending=ending):
+                run_dir = self.run_session(quest_over_udp=False, ending=ending, practice=True)
+                self.assertEqual(json.loads((run_dir / "teleop_end.json").read_text())["reason"], reason)
+
+    def run_session(self, quest_over_udp, ending="y", monitor_after_s=None, operator_defaults=False, practice=False):
         profile = load_profile("openarm_dual_gripper")
         right = profile.sides["right"]
         isaac = FakeIsaac(profile, monitor_after_s)
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
             fifo = run_dir / "capture.fifo"
-            os.mkfifo(fifo)
             got = bytearray()
 
             def reader():  # like the chain's `cat capture.fifo`, until the writer closes it
@@ -188,10 +194,14 @@ class OpenArmTeleopRosTest(unittest.TestCase):
                     while b := f.read(1):
                         got.extend(b)
             th = threading.Thread(target=reader, daemon=True)
-            th.start()
+            if not practice:  # practice: the chain records nothing and makes no capture control
+                os.mkfifo(fifo)
+                th.start()
             argv = ["--arms", "right", "--run-dir", str(run_dir), "--max-run-s", "30"]
             if not operator_defaults:
                 argv += ["--scale", "1", "--rot-scale", "1", "--gripper-mode", "analog"]
+            if practice:
+                argv += ["--no-capture"]
             if monitor_after_s is not None:
                 argv += ["--end-on-success-topic", "/held_tote_teleop/status"]
             sender = None
@@ -214,11 +224,14 @@ class OpenArmTeleopRosTest(unittest.TestCase):
                 if sender:
                     sender.close()
                 isaac.close()
+            self.assertTrue((run_dir / "release").exists())
+            discard = run_dir / "teleop_discard.json"
+            if practice:
+                self.assertFalse(discard.exists() or fifo.exists())
+                return Path(shutil.copytree(run_dir, Path(tempfile.mkdtemp()) / "run"))
             th.join(timeout=2)
             self.assertFalse(th.is_alive(), "the teleop did not close the capture FIFO")
             self.assertEqual(bytes(got), b"  ", "one capture: start (A) + end (Y / B / success / second A)")
-            self.assertTrue((run_dir / "release").exists())
-            discard = run_dir / "teleop_discard.json"
             self.assertEqual(discard.exists(), ending == "b")
             if ending == "b":
                 self.assertEqual(json.loads(discard.read_text())["reason"], "discard")
