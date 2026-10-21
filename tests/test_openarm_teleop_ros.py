@@ -103,9 +103,39 @@ class ScriptedQuest:
         pass
 
 
+class UdpQuestSender:
+    """Plays a ScriptedQuest through quest_bridge datagrams, like `quest_bridge.py send` next to the headset."""
+
+    def __init__(self, port, hz=60.0):
+        from quest_bridge import encode
+        import socket
+        self.quest, self.stop = ScriptedQuest(), threading.Event()
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        def run():
+            seq = 0
+            while not self.stop.is_set():
+                seq += 1
+                sock.sendto(encode(seq, self.quest.read_all(), self.quest.buttons), ("127.0.0.1", port))
+                time.sleep(1.0 / hz)
+            sock.close()
+        self.thread = threading.Thread(target=run, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.stop.set()
+        self.thread.join(timeout=1.0)
+
+
 @unittest.skipUnless(HAVE, WHY)
 class OpenArmTeleopRosTest(unittest.TestCase):
     def test_right_arm_session_with_capture_and_end(self):
+        self.run_session(quest_over_udp=False)
+
+    def test_same_session_with_the_controllers_over_udp(self):
+        self.run_session(quest_over_udp=True)
+
+    def run_session(self, quest_over_udp):
         profile = load_profile("openarm_dual_gripper")
         right = profile.sides["right"]
         isaac = FakeIsaac(profile)
@@ -121,10 +151,26 @@ class OpenArmTeleopRosTest(unittest.TestCase):
                         got.extend(b)
             th = threading.Thread(target=reader, daemon=True)
             th.start()
+            argv = ["--arms", "right", "--run-dir", str(run_dir), "--max-run-s", "30"]
+            sender = None
             try:
-                with patch.object(teleop, "QuestController", return_value=ScriptedQuest()):
-                    teleop.main(["--arms", "right", "--run-dir", str(run_dir), "--max-run-s", "30"])
+                if quest_over_udp:
+                    port = random.randint(47720, 47790)
+                    real = teleop.NetworkQuest
+
+                    def receiver_then_sender(*a, **kw):  # start the script once the teleop listens
+                        nonlocal sender
+                        rx = real(*a, **kw)
+                        sender = UdpQuestSender(port)
+                        return rx
+                    with patch.object(teleop, "NetworkQuest", side_effect=receiver_then_sender):
+                        teleop.main(argv + ["--quest-source", f"udp://127.0.0.1:{port}"])
+                else:
+                    with patch.object(teleop, "QuestController", return_value=ScriptedQuest()):
+                        teleop.main(argv)
             finally:
+                if sender:
+                    sender.close()
                 isaac.close()
             th.join(timeout=2)
             self.assertFalse(th.is_alive(), "the teleop did not close the capture FIFO")
@@ -135,7 +181,7 @@ class OpenArmTeleopRosTest(unittest.TestCase):
         # never a command for the left arm (the tote teacher owns it)
         self.assertEqual(isaac.received["/left_joint_command"], [])
         cmds = isaac.received["/right_joint_command"]
-        self.assertGreater(len(cmds), 100)
+        self.assertGreater(len(cmds), 50)  # ~85 when the script runs at the 60 Hz sender rate
         self.assertEqual(set(cmds[0]), set(right.joints) | set(right.gripper_joints))
         # the first command is the pose Isaac already holds (no jump)
         q0 = np.array([cmds[0][j] for j in right.joints])

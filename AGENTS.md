@@ -211,3 +211,20 @@
   - 新增 `tests/test_openarm_kinematics.py`（10 項，純 numpy）和 `tests/test_openarm_teleop_ros.py`（1 項：假 Quest + 假 Isaac + FIFO，跑在隨機 ROS domain）。
   - 全套 66 項中 13 項 error，全部是 `igus_rebel_description` 找不到（本機沒有 build igus_ws）。乾淨的 HEAD 匯出版本有相同的 13 項 error，所以不是這次修改造成的。
 - 下一步：使用者跑 `quest_probe.py`（P0 驗收）→ P2（ITRI 端的 `run_held_tote_teleop.py` glue 和 `measurements.json`；啟動 Isaac 前需使用者同意）。
+
+### Quest 在遠端：網路 bridge（2026-10-21，Claude）
+
+- 狀況：
+  - 主機的 Sunshine（Moonlight 串流主機）佔用 UDP 47998。這是 CloudXR StreamSDK 寫死的 port：`NV_CXR_MEDIA_PORT` 和 `NV_CXR_SERVER_PORT` 都改不到它，已實測。
+  - 使用者正透過 Sunshine 遠端操作，不能停掉它。
+  - Quest 在使用者那一端，旁邊有一台跑 Patrick 版本（igus、Isaac 6.1）的 4060 筆電，CloudXR 在那台已經能用。
+- 做法：新增 `quest_teleop/quest_bridge.py`。
+  - 筆電跑 `send --to <主機 Tailscale IP>:47710`：CloudXR 加上兩支控制器，以 60 Hz UDP 送出 JSON。
+  - 主機的 `quest_openarm_teleop.py --quest-source udp://0.0.0.0:47710` 和 `quest_probe.py --source udp://...` 改用 `NetworkQuest`，介面和 `QuestController` 相同。
+  - 超過 0.2 s 沒收到新資料就視為 tracking lost，手臂放開；亂序的封包會被忽略；可以用 `--allow` 限制來源 IP。
+- 測試：
+  - `tests/test_quest_bridge.py`：7 項，localhost UDP。
+  - ROS 測試多了一項「控制器資料經 UDP」的完整 session。
+  - 全套 74 項，13 項 error 仍然只是缺 igus_ws。
+- 尚未實機驗證：筆電端的 sender、Tailscale 的延遲，以及主機防火牆（ufw）是否放行 UDP 47710。
+

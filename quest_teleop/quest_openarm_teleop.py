@@ -38,6 +38,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 
 from arm_collision import clearance, link_capsules
+from quest_bridge import NetworkQuest
 from quest_input import QuestController
 from robot_profile import load_profile
 from teleop_core import ArmTeleop, TeleopLimits
@@ -201,6 +202,9 @@ def parse_args(argv=None):
     p.add_argument("--min-arm-dist", type=float, default=0.03, help="inter-arm guard: capsule surface clearance [m]")
     p.add_argument("--link-radius", type=float, default=0.05)
     p.add_argument("--tool-radius", type=float, default=0.045)
+    p.add_argument("--quest-source", default="cloudxr",
+                   help="cloudxr = CloudXR runs on this machine; udp://0.0.0.0:47710 = controllers from a "
+                        "quest_bridge.py sender on the machine next to the headset")
     p.add_argument("--seed-topic", default="/joint_command",
                    help="start from the targets last published here ('' = from the measured joints)")
     p.add_argument("--run-dir", type=Path, help="held-tote chain run dir: capture.fifo, release, teleop_discard.json")
@@ -311,9 +315,16 @@ def main(argv=None):
     try:
         node.wait_ready()
         # both hands always: the buttons (X/Y on the left, A/B on the right) are needed with one arm too
-        xr = QuestController(list(SIDES), HERE / "cloudxr_quest3.env", app_name=profile.app_name)
-        log.info("CloudXR up. Quest Browser -> https://nvidia.github.io/IsaacTeleop/client/v1.3.131/ , Server IP = "
-                 "this PC, Connect. Hold SQUEEZE to move, TRIGGER = gripper, A/X = capture, B = discard, Y = end.")
+        if args.quest_source == "cloudxr":
+            xr = QuestController(list(SIDES), HERE / "cloudxr_quest3.env", app_name=profile.app_name)
+        elif args.quest_source.startswith("udp://"):
+            xr = NetworkQuest(args.quest_source, hands=SIDES, log=log.info)
+            log.info(f"[bridge] listening on udp {xr.address[0]}:{xr.address[1]} for quest_bridge.py send")
+        else:
+            raise SystemExit(f"--quest-source {args.quest_source!r}: cloudxr or udp://host:port")
+        log.info("Quest ready. Hold SQUEEZE to move, TRIGGER = gripper, A/X = capture, B = discard, Y = end."
+                 + (" CloudXR: Quest Browser -> https://nvidia.github.io/IsaacTeleop/client/v1.3.131/ , Server IP = "
+                    "this PC, Connect." if args.quest_source == "cloudxr" else ""))
         run(node, args, xr)
     finally:
         if xr is not None:

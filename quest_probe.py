@@ -3,6 +3,7 @@
 ROS. Use it to check the headset <-> workstation link before driving an arm.
 
   .venv_quest/bin/python quest_probe.py            # Ctrl+C to quit
+  .venv_quest/bin/python quest_probe.py --source udp://0.0.0.0:47710   # controllers from quest_bridge.py send
 
 Per hand: grip position in the operator frame (x forward, y left, z up) and its change since tracking started
 [cm], orientation (roll / pitch / yaw, deg), squeeze, trigger, buttons (A/X = primary, B/Y = secondary). Every 5 s a
@@ -19,7 +20,7 @@ from scipy.spatial.transform import Rotation
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "quest_teleop"))
-from quest_input import QuestController  # noqa: E402
+from quest_bridge import make_quest  # noqa: E402
 
 BUTTON_NAMES = {"left": ("X", "Y"), "right": ("A", "B")}
 
@@ -29,11 +30,14 @@ def main():
     parser.add_argument("--hands", nargs="+", choices=["left", "right"], default=["left", "right"])
     parser.add_argument("--hz", type=float, default=5.0, help="print rate")
     parser.add_argument("--read-hz", type=float, default=60.0, help="controller read rate")
+    parser.add_argument("--source", default="cloudxr",
+                        help="cloudxr = CloudXR on this machine; udp://0.0.0.0:47710 = a quest_bridge.py sender")
     args = parser.parse_args()
 
-    xr = QuestController(args.hands, HERE / "quest_teleop" / "cloudxr_quest3.env", app_name="QuestProbe")
-    print("CloudXR up. Quest Browser -> https://nvidia.github.io/IsaacTeleop/client/v1.3.131/ , Server IP = this PC, "
-          "accept the certificate, back, Connect.", flush=True)
+    xr = make_quest(args.source, args.hands, "QuestProbe")
+    if args.source == "cloudxr":
+        print("CloudXR up. Quest Browser -> https://nvidia.github.io/IsaacTeleop/client/v1.3.131/ , Server IP = this "
+              "PC, accept the certificate, back, Connect.", flush=True)
     origin = {h: None for h in args.hands}
     last_pos = {h: None for h in args.hands}
     fresh = {h: 0 for h in args.hands}
@@ -74,8 +78,10 @@ def main():
                 print(" | ".join(lines), flush=True)
             if t0 - t_rate >= 5.0:
                 hz = {h: fresh[h] / (t0 - t_rate) for h in args.hands}
+                net = (f" | bridge: {xr.received} datagrams, {xr.dropped} lost, last {xr.age() * 1e3:.0f} ms ago"
+                       if hasattr(xr, "received") else "")
                 print("[rate] fresh poses " + ", ".join(f"{h} {v:.0f} Hz" for h, v in hz.items())
-                      + f" | presses {presses}", flush=True)
+                      + f" | presses {presses}" + net, flush=True)
                 fresh = {h: 0 for h in args.hands}
                 t_rate = t0
             time.sleep(max(0.0, 1.0 / args.read_hz - (time.perf_counter() - t0)))
