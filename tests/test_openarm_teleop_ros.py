@@ -8,6 +8,7 @@ capture control. Needs ROS 2 Humble's rclpy (source /opt/ros/humble/setup.bash) 
 Runs on its own ROS domain, localhost only.
 """
 
+import json
 import os
 import random
 import sys
@@ -42,7 +43,9 @@ except Exception as exc:  # no ROS / no URDF
 class FakeIsaac:
     """Joint targets follow the commands instantly; states at ~60 Hz, merged commands at ~30 Hz."""
 
-    def __init__(self, profile):
+    def __init__(self, profile, monitor_after_s=None):
+        """monitor_after_s: like the held-tote pick monitor, report {"succeeded": true} on /held_tote_teleop/status
+        once the teleop has been capturing this long."""
         self.ctx = Context()
         rclpy.init(context=self.ctx)
         self.node = rclpy.create_node("fake_isaac", context=self.ctx)
@@ -58,6 +61,16 @@ class FakeIsaac:
         self.cmd_pub = self.node.create_publisher(JointState, "/joint_command", 10)
         self.node.create_timer(1 / 60, self.tick)
         self.node.create_timer(1 / 30, lambda: self.cmd_pub.publish(self.msg()))
+        self.capture_since = None
+        if monitor_after_s is not None:
+            from std_msgs.msg import String
+            self.status_pub = self.node.create_publisher(String, "/held_tote_teleop/status", 10)
+            self.node.create_subscription(String, "/quest_teleop/state", self.on_state, 10)
+
+            def report():
+                ok = self.capture_since is not None and time.monotonic() - self.capture_since > monitor_after_s
+                self.status_pub.publish(String(data=json.dumps({"succeeded": ok})))
+            self.node.create_timer(0.1, report)
         self.ex = SingleThreadedExecutor(context=self.ctx)
         self.ex.add_node(self.node)
         self.thread = threading.Thread(target=self.ex.spin, daemon=True)
@@ -65,6 +78,13 @@ class FakeIsaac:
 
     def msg(self):
         return JointState(name=list(self.q), position=[float(v) for v in self.q.values()])
+
+    def on_state(self, msg):
+        capturing = json.loads(msg.data).get("capturing")
+        if capturing and self.capture_since is None:
+            self.capture_since = time.monotonic()
+        elif not capturing:
+            self.capture_since = None
 
     def on_cmd(self, topic, msg):
         self.received[topic].append(dict(zip(msg.name, msg.position)))
@@ -82,10 +102,12 @@ class FakeIsaac:
 
 
 class ScriptedQuest:
-    """Both hands; the right hand drives. Tick-based script, see the module docstring."""
+    """Both hands; the right hand drives. Tick-based script, see the module docstring. ending: "y" (Y at tick 170),
+    "b" (B at 150, during the capture), "none" (no button: the monitor's success ends it), "a_thrice" (A at 100,
+    130 and 150, then Y)."""
 
-    def __init__(self):
-        self.k = 0
+    def __init__(self, ending="y"):
+        self.k, self.ending = 0, ending
         self.quat = Rotation.from_euler("xyz", [10, -20, 30], degrees=True).as_quat()
         self.buttons = {"left": (False, False), "right": (False, False)}
 
@@ -94,7 +116,9 @@ class ScriptedQuest:
         squeeze = 1.0 if 20 <= k < 160 else 0.0
         x = 0.3 + 0.1 * np.clip((k - 30) / 30, 0, 1)
         trigger = float(np.clip((k - 110) / 30, 0, 1))
-        self.buttons = {"left": (False, 170 <= k < 175), "right": (100 <= k < 104, False)}
+        a_at = (100, 130, 150) if self.ending == "a_thrice" else (100,)
+        self.buttons = {"left": (False, self.ending in ("y", "a_thrice") and 170 <= k < 175),
+                        "right": (any(t <= k < t + 4 for t in a_at), self.ending == "b" and 150 <= k < 154)}
         right = (True, np.array([x, -0.2, 1.1]), self.quat, squeeze, trigger)
         left = (True, np.array([0.3, 0.2, 1.1]), self.quat, 0.0, 0.0)
         return {"left": left, "right": right}
@@ -106,10 +130,10 @@ class ScriptedQuest:
 class UdpQuestSender:
     """Plays a ScriptedQuest through quest_bridge datagrams, like `quest_bridge.py send` next to the headset."""
 
-    def __init__(self, port, hz=60.0):
+    def __init__(self, port, hz=60.0, ending="y"):
         from quest_bridge import encode
         import socket
-        self.quest, self.stop = ScriptedQuest(), threading.Event()
+        self.quest, self.stop = ScriptedQuest(ending), threading.Event()
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
         def run():
@@ -135,10 +159,20 @@ class OpenArmTeleopRosTest(unittest.TestCase):
     def test_same_session_with_the_controllers_over_udp(self):
         self.run_session(quest_over_udp=True)
 
-    def run_session(self, quest_over_udp):
+    def test_the_monitors_success_ends_the_capture_and_the_attempt(self):
+        run_dir = self.run_session(quest_over_udp=False, ending="none", monitor_after_s=1.0)
+        self.assertFalse((run_dir / "teleop_discard.json").exists())
+
+    def test_b_discards_before_the_capture_ends(self):
+        self.run_session(quest_over_udp=False, ending="b")
+
+    def test_only_one_capture_per_attempt(self):
+        self.run_session(quest_over_udp=False, ending="a_thrice")
+
+    def run_session(self, quest_over_udp, ending="y", monitor_after_s=None):
         profile = load_profile("openarm_dual_gripper")
         right = profile.sides["right"]
-        isaac = FakeIsaac(profile)
+        isaac = FakeIsaac(profile, monitor_after_s)
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
             fifo = run_dir / "capture.fifo"
@@ -152,6 +186,8 @@ class OpenArmTeleopRosTest(unittest.TestCase):
             th = threading.Thread(target=reader, daemon=True)
             th.start()
             argv = ["--arms", "right", "--run-dir", str(run_dir), "--max-run-s", "30"]
+            if monitor_after_s is not None:
+                argv += ["--end-on-success-topic", "/held_tote_teleop/status"]
             sender = None
             try:
                 if quest_over_udp:
@@ -161,12 +197,12 @@ class OpenArmTeleopRosTest(unittest.TestCase):
                     def receiver_then_sender(*a, **kw):  # start the script once the teleop listens
                         nonlocal sender
                         rx = real(*a, **kw)
-                        sender = UdpQuestSender(port)
+                        sender = UdpQuestSender(port, ending=ending)
                         return rx
                     with patch.object(teleop, "NetworkQuest", side_effect=receiver_then_sender):
                         teleop.main(argv + ["--quest-source", f"udp://127.0.0.1:{port}"])
                 else:
-                    with patch.object(teleop, "QuestController", return_value=ScriptedQuest()):
+                    with patch.object(teleop, "QuestController", return_value=ScriptedQuest(ending)):
                         teleop.main(argv)
             finally:
                 if sender:
@@ -174,9 +210,14 @@ class OpenArmTeleopRosTest(unittest.TestCase):
                 isaac.close()
             th.join(timeout=2)
             self.assertFalse(th.is_alive(), "the teleop did not close the capture FIFO")
-            self.assertEqual(bytes(got), b"  ", "capture start (A) + end (on Y)")
+            self.assertEqual(bytes(got), b"  ", "one capture: start (A) + end (Y / B / success / second A)")
             self.assertTrue((run_dir / "release").exists())
-            self.assertFalse((run_dir / "teleop_discard.json").exists())
+            discard = run_dir / "teleop_discard.json"
+            self.assertEqual(discard.exists(), ending == "b")
+            if ending == "b":
+                self.assertEqual(json.loads(discard.read_text())["reason"], "discard")
+        if ending != "y":
+            return run_dir
 
         # never a command for the left arm (the tote teacher owns it)
         self.assertEqual(isaac.received["/left_joint_command"], [])

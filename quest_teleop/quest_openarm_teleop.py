@@ -15,6 +15,8 @@ Held-tote chain (--run-dir <run_dir> of run_tote_chain_flow.sh with TOTE_CHAIN_A
   A or X       start / end the pick capture (one byte on <run_dir>/capture.fifo each)
   B            discard: end the capture, write <run_dir>/teleop_discard.json, end the attempt
   Y            end the attempt: end the capture, touch <run_dir>/release (the chain pushes the tote back)
+With --end-on-success-topic, a std_msgs/String JSON message {"succeeded": true} received during a capture ends the
+capture and the attempt by itself (the held-tote pick monitor: item held above the rim long enough).
 Without --run-dir the buttons are only published on /quest_teleop/events ("toggle", "discard", "end").
 
 Run with the ROS environment of the chain flow (ROS_DOMAIN_ID 42, rmw_fastrtps_cpp + its FastDDS profile; NOT
@@ -53,15 +55,19 @@ class CaptureControl:
     kept open; closing it ends an open capture on the recorder side."""
 
     def __init__(self, fifo: Path | None):
-        self.fifo, self.fd, self.capturing = fifo, None, False
+        self.fifo, self.fd, self.capturing, self.done = fifo, None, False, False
 
     def toggle(self) -> bool:
+        """Start, or end, THE capture; the held-tote recorder takes one pick capture per attempt."""
         if self.fifo is None:
             return False
+        if self.done:
+            raise RuntimeError("the pick capture already ended - press Y to end the attempt (B to discard it)")
         if self.fd is None:
             self.fd = os.open(self.fifo, os.O_WRONLY | os.O_NONBLOCK)  # ENXIO: no reader (chain not ready)
         if os.write(self.fd, b" ") != 1:
             raise RuntimeError("capture control write failed")
+        self.done = self.capturing
         self.capturing = not self.capturing
         return True
 
@@ -102,6 +108,15 @@ class OpenArmTeleop(Node):
         self.create_subscription(JointState, profile.state_topic, self._on_state, LATEST)
         if args.seed_topic:
             self.create_subscription(JointState, args.seed_topic, self._on_seed, LATEST)
+        self.succeeded = False  # --end-on-success-topic: reset at every capture start
+        if args.end_on_success_topic:
+            self.create_subscription(String, args.end_on_success_topic, self._on_success, 10)
+
+    def _on_success(self, msg):
+        try:
+            self.succeeded = self.succeeded or bool(json.loads(msg.data).get("succeeded"))
+        except (ValueError, AttributeError):
+            pass
 
     def _on_state(self, msg):
         d = dict(zip(msg.name, msg.position))
@@ -209,6 +224,10 @@ def parse_args(argv=None):
                    help="start from the targets last published here ('' = from the measured joints)")
     p.add_argument("--run-dir", type=Path, help="held-tote chain run dir: capture.fifo, release, teleop_discard.json")
     p.add_argument("--max-run-s", type=float, default=0.0, help="end the attempt after this long (0 = no limit)")
+    p.add_argument("--end-on-success-topic", default="",
+                   help='std_msgs/String JSON topic; {"succeeded": true} during a capture ends the capture and attempt')
+    p.add_argument("--fifo-wait-s", type=float, default=60.0,
+                   help="with --run-dir: wait this long at start for the chain's capture.fifo")
     args, ros_args = p.parse_known_args(argv)
     if len(set(args.arms)) != len(args.arms):
         p.error("--arms must not contain duplicates")
@@ -221,12 +240,13 @@ def parse_args(argv=None):
 def end_attempt(node, capture, args, reason, discard=False):
     """End the open capture, mark a discard, release the tote (chain flow)."""
     log = node.get_logger()
+    if args.run_dir is not None and discard:
+        # before the capture end: the pick monitor reads it when the capture ends
+        (args.run_dir / "teleop_discard.json").write_text(
+            json.dumps({"reason": reason, "unix_s": time.time()}, indent=2) + "\n")
     capture.end()
     capture.close()
     if args.run_dir is not None:
-        if discard:
-            (args.run_dir / "teleop_discard.json").write_text(
-                json.dumps({"reason": reason, "unix_s": time.time()}, indent=2) + "\n")
         (args.run_dir / "release").touch()
     log.warning(f"attempt ended ({reason})" + (" - discarded" if discard else ""))
 
@@ -240,6 +260,12 @@ def run(node, args, xr):
     stop = {"requested": False}
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.__setitem__("requested", True))
+    if capture.fifo is not None:
+        deadline = time.monotonic() + args.fifo_wait_s
+        while not capture.fifo.exists() and rclpy.ok() and not stop["requested"]:
+            if time.monotonic() > deadline:
+                raise SystemExit(f"no capture control at {capture.fifo} after {args.fifo_wait_s:.0f} s")
+            rclpy.spin_once(node, timeout_sec=0.1)
     t_start = time.monotonic()
     ended = None
     try:
@@ -280,11 +306,14 @@ def run(node, args, xr):
                 was_p, was_s = last_buttons.get(h, (False, False))
                 if prim and not was_p:
                     try:
+                        node.succeeded = False  # a success counts only within the capture it ends
                         sent = capture.toggle()
                         log.warning(f"[{h} hand] capture {'START' if capture.capturing else 'END'}" if sent
                                     else f"[{h} hand] toggle (no --run-dir)")
                     except OSError as exc:
                         log.error(f"capture control not available ({exc}) - is the chain waiting for the pick?")
+                    except RuntimeError as exc:
+                        log.error(str(exc))
                     node.event_pub.publish(String(data="toggle"))
                 if sec and not was_s:
                     ev = "end" if h == "left" else "discard"
@@ -293,6 +322,9 @@ def run(node, args, xr):
                         ended = ev
                     log.warning(f"[{h} hand] {ev}")
                 last_buttons[h] = (prim, sec)
+            if node.succeeded and capture.capturing and ended is None:
+                ended = "success"
+                log.warning("pick succeeded (held above the rim) - ending the capture")
             if args.max_run_s and time.monotonic() - t_start > args.max_run_s and ended is None:
                 ended = "timeout"
             time.sleep(max(0.0, dt - (time.perf_counter() - t0)))
