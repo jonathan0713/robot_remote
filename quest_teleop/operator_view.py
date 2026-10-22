@@ -5,7 +5,8 @@ Defaults are the OpenArm held-tote ones (the operator's choice, 2026-10-21): the
 side cameras (ITRI run_tote_pick_scene.py --operator-cameras) and the right wrist (for the final alignment), and a
 status bar
 from /quest_teleop/state (arm engaged / tracked / lost, gripper opening, recording) and /held_tote_teleop/status
-(item over the rim, hold time). Run it on the machine the operator watches (Moonlight shows its desktop), with the
+(item over the rim, hold time, and the gripper's depth: its lowest point over the tote floor, also as a bar at the
+right edge of the cameras next to the item's top). Run it on the machine the operator watches (Moonlight shows its desktop), with the
 chain's ROS environment.
 
   source /opt/ros/humble/setup.bash
@@ -96,7 +97,38 @@ def status_lines(state: dict | None, pick: dict | None, now: float, state_t: flo
         lines.append((f"item {pick['clearance_m'] * 100:+.1f} cm over the rim (need 2.0)   held "
                       f"{pick.get('hold_s', 0.0):.1f} / 2.0 s" + ("   DONE" if done else ""),
                       (0, 255, 0) if done else (0, 255, 255)))
+        if pick.get("tip_above_floor_m") is not None:
+            h = pick["tip_above_floor_m"]
+            lines.append((f"gripper {h * 100:+.1f} cm over the floor   item top {pick['item_top_above_floor_m'] * 100:.1f} cm"
+                          f"   TCP {pick['tcp_off_item_centre_m'] * 100:.1f} cm off the item centre",
+                          (0, 0, 255) if h < 0.01 else (0, 255, 255) if h < 0.025 else (255, 255, 255)))
     return lines
+
+
+def depth_gauge(canvas: np.ndarray, pick: dict | None, full_m: float = 0.20, tiles_h: int = 720) -> np.ndarray:
+    """A depth bar at the right edge of the camera tiles: the tote floor at the bottom, the item's top (yellow) and the
+    gripper's lowest point (green; yellow under 2.5 cm, red under 1 cm over the floor). The cameras give no depth."""
+    import cv2
+
+    if not pick or pick.get("tip_above_floor_m") is None:
+        return canvas
+    w = canvas.shape[1]
+    x0, x1, top, bottom = w - 70, w - 40, 60, min(canvas.shape[0], tiles_h) - 60
+    y = lambda m: int(bottom - (bottom - top) * min(max(m / full_m, 0.0), 1.0))
+    cv2.rectangle(canvas, (x0 - 6, top - 30), (x1 + 34, bottom + 24), (0, 0, 0), -1)
+    cv2.rectangle(canvas, (x0, top), (x1, bottom), (120, 120, 120), 1)
+    cv2.line(canvas, (x0 - 4, bottom), (x1 + 4, bottom), (255, 255, 255), 2)
+    cv2.putText(canvas, "floor", (x0 - 4, bottom + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+    item = pick.get("item_top_above_floor_m")
+    if item is not None:
+        cv2.rectangle(canvas, (x0 + 4, y(item)), (x1 - 4, bottom), (0, 160, 160), -1)
+        cv2.putText(canvas, "item", (x0 - 2, y(item) - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+    h = pick["tip_above_floor_m"]
+    colour = (0, 0, 255) if h < 0.01 else (0, 255, 255) if h < 0.025 else (0, 255, 0)
+    cv2.line(canvas, (x0 - 6, y(h)), (x1 + 6, y(h)), colour, 3)
+    cv2.putText(canvas, f"{h * 100:.1f}", (x1 + 2, y(h) - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 2)
+    cv2.putText(canvas, "cm", (x0 - 2, top - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+    return canvas
 
 
 def overlay(canvas: np.ndarray, text: str, colour=(0, 255, 0), tiles_h: int = 720) -> np.ndarray:
@@ -205,6 +237,8 @@ def main(argv=None):
                                                                  status["state_t"], status["pick_t"], runner), now)
             if runner is not None and runner.get("phase") in READY_PHASES:
                 overlay(canvas, runner.get("banner") or runner.get("text", ""))
+            elif status["pick"] is not None and now - status["pick_t"] < 1.0:
+                depth_gauge(canvas, status["pick"])
             if args.scale != 1.0:
                 canvas = cv2.resize(canvas, None, fx=args.scale, fy=args.scale)
             cv2.imshow(window, canvas)

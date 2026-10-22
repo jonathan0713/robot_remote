@@ -98,5 +98,27 @@ class OperatorViewTest(unittest.TestCase):
         self.assertEqual(canvas[100, 640].tolist(), [0, 0, 0])        # the tiles above stay untouched
 
 
+    def test_the_gripper_depth_line_warns_near_the_floor(self):
+        pick = {"clearance_m": -0.1, "hold_s": 0.0, "succeeded": False, "tip_above_floor_m": 0.032,
+                "item_top_above_floor_m": 0.105, "tcp_off_item_centre_m": 0.014}
+        lines = view.status_lines({"right": "engaged", "capturing": True}, pick, 10.0, 9.9, 9.9)
+        self.assertEqual(lines[-1][0], "gripper +3.2 cm over the floor   item top 10.5 cm   TCP 1.4 cm off the item centre")
+        self.assertEqual(lines[-1][1], (255, 255, 255))
+        self.assertEqual(view.status_lines(None, dict(pick, tip_above_floor_m=0.008), 10.0, 0.0, 9.9)[-1][1], (0, 0, 255))
+        self.assertEqual(view.status_lines(None, dict(pick, tip_above_floor_m=0.02), 10.0, 0.0, 9.9)[-1][1], (0, 255, 255))
+
+    @unittest.skipUnless(HAVE_CV2, "no OpenCV")
+    def test_the_depth_bar_marks_the_gripper_over_the_floor(self):
+        canvas = np.zeros((760, 1280, 3), np.uint8)
+        view.depth_gauge(canvas, {"tip_above_floor_m": 0.005, "item_top_above_floor_m": 0.10})
+        bottom, top = 720 - 60, 60
+        y = int(bottom - (bottom - top) * 0.005 / 0.20)
+        self.assertEqual(canvas[y, 1280 - 55].tolist(), [0, 0, 255])  # red: under 1 cm
+        self.assertGreater(canvas[int(bottom - (bottom - top) * 0.05 / 0.2), 1280 - 55, 1], 100)  # item column
+        before = canvas.copy()
+        view.depth_gauge(canvas, {"clearance_m": 0.0})  # no depth (no kinematics): nothing drawn
+        self.assertTrue((canvas == before).all())
+
+
 if __name__ == "__main__":
     unittest.main()
