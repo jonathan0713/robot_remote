@@ -35,8 +35,8 @@
       "tool_out_axis": [0.0, 0.0, -1.0],
       "gripper": {"joints": ["openarm_right_finger_joint1"], "open": 0.040, "closed": 0.0},
       "command_topic": "/right_joint_command",
-      "rest": [-0.041146, 2.035242, 0.759658, 1.930547, -0.758908, -0.153640, 1.349915],
-      "rest_source": "ITRI_project config/tote_pick/held_tote_start_v5.json right_arm.joints (ready pose)"
+      "rest": [-0.083776, 1.429425, 0.254818, 1.90939, -0.783653, 0.0, 1.099557],
+      "rest_source": "Teleop start B-high' (2026-10-22; deg [-4.8, 81.9, 14.6, 109.4, -44.9, 0.0, 63.0]), the start the ITRI teleop round teleports the right arm to (config/tote_pick/held_tote_teleop_v1.json right_start): elbow level with the shoulder and 28 cm out, TCP beside the held tote 5 cm over the rim, gripper aimed at the tote centre, wrist centred (j6 = 0), joint margin >= 15%. The campaign v5 ready pose (held_tote_start_v5.json) folded the elbow 12 cm over the shoulder."
     }
   }
 }
