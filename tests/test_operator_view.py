@@ -66,5 +66,37 @@ class OperatorViewTest(unittest.TestCase):
         self.assertLess(canvas[150, 240].max(), 200)                      # no image yet (bottom right)
 
 
+    def test_the_round_runner_heads_the_status_bar_and_between_attempts_no_teleop_is_fine(self):
+        import json as _json
+        import os
+        import tempfile
+        state = {"right": "engaged", "capturing": False}
+        ready = {"phase": "ready", "text": "READY - A = attempt 1: green tea pack", "last": "attempt 0: admitted",
+                 "pid": os.getpid()}
+        lines = view.status_lines(None, None, now=10.0, state_t=0.0, pick_t=0.0, runner=ready)
+        self.assertEqual(lines[0], ("READY - A = attempt 1: green tea pack", (0, 255, 0)))
+        self.assertEqual(lines[1][0], "last: attempt 0: admitted")
+        self.assertFalse(any("no /quest_teleop/state" in t for t, _ in lines))  # no teleop between attempts
+        teleop = dict(ready, phase="teleop", text="attempt 1: green tea pack")
+        self.assertTrue(any("no /quest_teleop/state" in t for t, _ in view.status_lines(None, None, 10.0, 0.0, 0.0,
+                                                                                         teleop)))
+        self.assertIn("RECORDING", view.status_lines(dict(state, capturing=True), None, 10.0, 9.9, 0.0, teleop)[2][0])
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "runner_status.json"
+            self.assertIsNone(view.read_runner_status(path))       # no runner yet
+            path.write_text(_json.dumps(ready))
+            self.assertEqual(view.read_runner_status(path)["phase"], "ready")
+            path.write_text(_json.dumps(dict(ready, pid=2 ** 22 + 12345)))
+            self.assertIsNone(view.read_runner_status(path))       # its runner is gone: a stale file shows nothing
+        self.assertIsNone(view.read_runner_status(None))
+
+    @unittest.skipUnless(HAVE_CV2, "no OpenCV")
+    def test_the_ready_banner_crosses_the_camera_tiles(self):
+        canvas = np.zeros((760, 1280, 3), np.uint8)
+        view.overlay(canvas, "READY - press A")
+        self.assertEqual(canvas[360 - 45, 640].tolist(), [0, 255, 0])  # its green frame, mid-height of the tiles
+        self.assertEqual(canvas[100, 640].tolist(), [0, 0, 0])        # the tiles above stay untouched
+
+
 if __name__ == "__main__":
     unittest.main()

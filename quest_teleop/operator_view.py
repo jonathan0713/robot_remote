@@ -11,7 +11,9 @@ chain's ROS environment.
   source /opt/ros/humble/setup.bash
   python3 quest_teleop/operator_view.py            # keys: l = left wrist in place of the right wrist, q = quit
 
-A tile shows "no image" until its topic publishes, and turns grey with its age when it goes stale.
+A tile shows "no image" until its topic publishes, and turns grey with its age when it goes stale. With
+--runner-status (the ITRI round runner passes its <out>/runner_status.json) the runner's phase heads the status bar,
+and when the next attempt can start a green banner over the cameras says so (A on the Quest starts it).
 """
 
 import argparse
@@ -35,11 +37,46 @@ def image_to_bgr(msg) -> np.ndarray | None:
     return a[..., ::-1] if msg.encoding.startswith("rgb") else a
 
 
-def status_lines(state: dict | None, pick: dict | None, now: float, state_t: float, pick_t: float) -> list:
-    """[(text, (b, g, r))] for the status bar."""
-    lines = []
+READY_PHASES = ("ready",)
+RUNNER_COLOURS = {"ready": (0, 255, 0), "restoring": (0, 255, 255), "writing": (0, 255, 255),
+                  "teleop": (255, 255, 255), "practice": (255, 255, 255), "done": (200, 200, 200)}
+
+
+def read_runner_status(path) -> dict | None:
+    """The round runner's status file (ITRI run_held_tote_teleop.py), or None when absent, unreadable or its runner
+    process is gone."""
+    import os
+
+    if path is None:
+        return None
+    try:
+        with open(path) as f:
+            status = json.loads(f.read())
+        os.kill(int(status["pid"]), 0)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return status
+
+
+def runner_lines(runner: dict | None) -> list:
+    """[(text, (b, g, r))]: what the round runner is doing between and around the attempts."""
+    if runner is None:
+        return []
+    lines = [(runner.get("text", ""), RUNNER_COLOURS.get(runner.get("phase"), (255, 255, 255)))]
+    if runner.get("last"):
+        lines.append((f"last: {runner['last']}", (200, 200, 200)))
+    return lines
+
+
+def status_lines(state: dict | None, pick: dict | None, now: float, state_t: float, pick_t: float,
+                 runner: dict | None = None) -> list:
+    """[(text, (b, g, r))] for the status bar; the runner's line first. Between attempts (runner not in its teleop
+    phase) no teleop runs, so its missing state is not an error then."""
+    lines = runner_lines(runner)
+    between = runner is not None and runner.get("phase") not in ("teleop", "practice")
     if state is None or now - state_t > 1.0:
-        lines.append(("teleop: no /quest_teleop/state", (0, 0, 255)))
+        if not between:
+            lines.append(("teleop: no /quest_teleop/state", (0, 0, 255)))
     else:
         arms = []
         for side in ("left", "right"):
@@ -60,6 +97,20 @@ def status_lines(state: dict | None, pick: dict | None, now: float, state_t: flo
                       f"{pick.get('hold_s', 0.0):.1f} / 2.0 s" + ("   DONE" if done else ""),
                       (0, 255, 0) if done else (0, 255, 255)))
     return lines
+
+
+def overlay(canvas: np.ndarray, text: str, colour=(0, 255, 0), tiles_h: int = 720) -> np.ndarray:
+    """A banner across the middle of the camera tiles (the operator watches the cameras, not the status bar)."""
+    import cv2
+
+    w = canvas.shape[1]
+    y = min(canvas.shape[0], tiles_h) // 2
+    cv2.rectangle(canvas, (0, y - 45), (w, y + 45), (0, 0, 0), -1)
+    cv2.rectangle(canvas, (0, y - 45), (w, y + 45), colour, 3)
+    size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
+    cv2.putText(canvas, text, (max(10, (w - size[0]) // 2), y + size[1] // 2), cv2.FONT_HERSHEY_SIMPLEX, 1.2,
+                colour, 3)
+    return canvas
 
 
 def compose(tiles: list, frames: dict, stamps: dict, lines: list, now: float, tile=(640, 360)) -> np.ndarray:
@@ -97,6 +148,8 @@ def main(argv=None):
     p.add_argument("--pick-topic", default="/held_tote_teleop/status")
     p.add_argument("--hz", type=float, default=15.0)
     p.add_argument("--scale", type=float, default=1.0, help="window scale (1.0 = 1280 x ~800)")
+    p.add_argument("--runner-status", help="the round runner's status JSON (phase, text, pid): its line in the "
+                   "status bar, and a banner over the cameras when the next attempt can start (A)")
     args, ros_args = p.parse_known_args(argv)
 
     import cv2
@@ -135,6 +188,7 @@ def main(argv=None):
     cv2.namedWindow(window, cv2.WINDOW_NORMAL)
     extra = None  # key of the extra tile shown in the free fourth slot
     opened = time.monotonic()
+    runner, runner_read = None, 0.0
     try:
         while rclpy.ok():
             t0 = time.monotonic()
@@ -145,8 +199,12 @@ def main(argv=None):
             if extra is not None:
                 shown[3] = EXTRA_TILES[extra]
             now = time.monotonic()
+            if now - runner_read > 0.25:
+                runner, runner_read = read_runner_status(args.runner_status), now
             canvas = compose(shown, frames, stamps, status_lines(status["state"], status["pick"], now,
-                                                                 status["state_t"], status["pick_t"]), now)
+                                                                 status["state_t"], status["pick_t"], runner), now)
+            if runner is not None and runner.get("phase") in READY_PHASES:
+                overlay(canvas, runner.get("banner") or runner.get("text", ""))
             if args.scale != 1.0:
                 canvas = cv2.resize(canvas, None, fx=args.scale, fy=args.scale)
             cv2.imshow(window, canvas)
