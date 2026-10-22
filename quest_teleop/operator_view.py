@@ -99,15 +99,28 @@ def status_lines(state: dict | None, pick: dict | None, now: float, state_t: flo
                       (0, 255, 0) if done else (0, 255, 255)))
         if pick.get("tip_above_floor_m") is not None:
             h = pick["tip_above_floor_m"]
-            lines.append((f"gripper {h * 100:+.1f} cm over the floor   item top {pick['item_top_above_floor_m'] * 100:.1f} cm"
-                          f"   TCP {pick['tcp_off_item_centre_m'] * 100:.1f} cm off the item centre",
-                          (0, 0, 255) if h < 0.01 else (0, 255, 255) if h < 0.025 else (255, 255, 255)))
+            window = pick.get("grasp_window_m")
+            text = (f"gripper {h * 100:+.1f} cm over the floor   item top {pick['item_top_above_floor_m'] * 100:.1f} cm"
+                    f"   TCP {pick['tcp_off_item_centre_m'] * 100:.1f} cm off the item centre")
+            if window:
+                text += f"   grasp window {window[0] * 100:.1f}-{window[1] * 100:.1f} cm" + ("  IN" if
+                                                                                         window[0] <= h <= window[1] else "")
+            lines.append((text, depth_colour(h, window, (255, 255, 255))))
     return lines
 
 
+def depth_colour(h: float, window=None, clear=(0, 255, 0)):
+    """With a grasp window: green inside it, red under it (on the floor), `clear` over it. Without: red under 1 cm,
+    yellow under 2.5 cm, else `clear`."""
+    if window:
+        return (0, 255, 0) if window[0] <= h <= window[1] else (0, 0, 255) if h < window[0] else clear
+    return (0, 0, 255) if h < 0.01 else (0, 255, 255) if h < 0.025 else clear
+
+
 def depth_gauge(canvas: np.ndarray, pick: dict | None, full_m: float = 0.20, tiles_h: int = 720) -> np.ndarray:
-    """A depth bar at the right edge of the camera tiles: the tote floor at the bottom, the item's top (yellow) and the
-    gripper's lowest point (green; yellow under 2.5 cm, red under 1 cm over the floor). The cameras give no depth."""
+    """A depth bar at the right edge of the camera tiles: the tote floor at the bottom, the item's top (yellow), the
+    item's grasp window (green frame) and the gripper's lowest point (green inside the window, white over it, red
+    under it; without a window yellow under 2.5 cm, red under 1 cm). The cameras give no depth."""
     import cv2
 
     if not pick or pick.get("tip_above_floor_m") is None:
@@ -123,8 +136,12 @@ def depth_gauge(canvas: np.ndarray, pick: dict | None, full_m: float = 0.20, til
     if item is not None:
         cv2.rectangle(canvas, (x0 + 4, y(item)), (x1 - 4, bottom), (0, 160, 160), -1)
         cv2.putText(canvas, "item", (x0 - 2, y(item) - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+    window = pick.get("grasp_window_m")
+    if window:  # where the operator's admitted grasps of this item closed
+        cv2.rectangle(canvas, (x0 - 4, y(window[1])), (x1 + 4, y(window[0])), (0, 200, 0), 2)
+        cv2.putText(canvas, "grasp", (x0 - 6, y(window[1]) - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
     h = pick["tip_above_floor_m"]
-    colour = (0, 0, 255) if h < 0.01 else (0, 255, 255) if h < 0.025 else (0, 255, 0)
+    colour = depth_colour(h, window, (255, 255, 255) if window else (0, 255, 0))
     cv2.line(canvas, (x0 - 6, y(h)), (x1 + 6, y(h)), colour, 3)
     cv2.putText(canvas, f"{h * 100:.1f}", (x1 + 2, y(h) - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, colour, 2)
     cv2.putText(canvas, "cm", (x0 - 2, top - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)

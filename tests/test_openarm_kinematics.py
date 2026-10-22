@@ -217,7 +217,7 @@ class ArmTeleopTest(unittest.TestCase):
 
     def test_the_profile_scales_rotation_per_axis(self):
         from robot_profile import rot_scale_axes
-        self.assertEqual(rot_scale_axes(load_profile("openarm_dual_gripper").operator), (0.5, 0.75, 1.0))
+        self.assertEqual(rot_scale_axes(load_profile("openarm_dual_gripper").operator), (1.0, 0.75, 1.0))
         self.assertEqual(rot_scale_axes({"rot_scale_axes": [1, 2, 3]}), (1.0, 2.0, 3.0))
         self.assertIsNone(rot_scale_axes({"rot_scale": 0.5}))
         with self.assertRaises(ValueError):

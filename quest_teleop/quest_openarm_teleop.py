@@ -11,7 +11,7 @@ Isaac's /joint_command. Arms that are not driven get no command at all (the left
 Per hand: hold SQUEEZE to move that arm, release to freeze it. TRIGGER drives its gripper: --gripper-mode toggle (the
 OpenArm profile's default) closes or opens it on each pull; analog closes it as far as the trigger is pulled, and
 follows only once the trigger has come within --grip-pickup of the current command (no jump on start). Hand motion
-is scaled by --scale (profile 0.5) and, per controller axis, --rot-scale-axes (profile twist 0.5, nod 0.75, side 1.0;
+is scaled by --scale (profile 0.5) and, per controller axis, --rot-scale-axes (profile twist 1.0, nod 0.75, side 1.0;
 an explicit --rot-scale scales every axis alike). Every attempt with --run-dir also saves <run_dir>/teleop_trace.npz
 (per tick: hand pose, target, command, joint command, measured joints) to see where the tool did not follow.
 

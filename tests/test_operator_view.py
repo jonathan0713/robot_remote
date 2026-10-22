@@ -120,5 +120,26 @@ class OperatorViewTest(unittest.TestCase):
         self.assertTrue((canvas == before).all())
 
 
+    def test_the_grasp_window_turns_the_depth_green_inside_it(self):
+        pick = {"clearance_m": -0.1, "hold_s": 0.0, "succeeded": False, "tip_above_floor_m": 0.012,
+                "item_top_above_floor_m": 0.03, "tcp_off_item_centre_m": 0.004, "grasp_window_m": [0.003, 0.018]}
+        line = view.status_lines(None, pick, 10.0, 0.0, 9.9)[-1]
+        self.assertTrue(line[0].endswith("grasp window 0.3-1.8 cm  IN") and line[1] == (0, 255, 0))
+        self.assertEqual(view.status_lines(None, dict(pick, tip_above_floor_m=0.001), 10.0, 0.0, 9.9)[-1][1], (0, 0, 255))
+        over = view.status_lines(None, dict(pick, tip_above_floor_m=0.05), 10.0, 0.0, 9.9)[-1]
+        self.assertEqual(over[1], (255, 255, 255))
+        self.assertFalse(over[0].endswith("IN"))
+
+    @unittest.skipUnless(HAVE_CV2, "no OpenCV")
+    def test_the_depth_bar_frames_the_grasp_window(self):
+        canvas = np.zeros((760, 1280, 3), np.uint8)
+        view.depth_gauge(canvas, {"tip_above_floor_m": 0.08, "item_top_above_floor_m": 0.12,
+                                  "grasp_window_m": [0.06, 0.11]})
+        bottom, top = 720 - 60, 60
+        y = lambda m: int(bottom - (bottom - top) * m / 0.20)
+        self.assertEqual(canvas[y(0.06), 1280 - 55].tolist(), [0, 200, 0])     # the window's frame
+        self.assertEqual(canvas[y(0.08), 1280 - 55].tolist(), [0, 255, 0])     # the gripper inside it: green
+
+
 if __name__ == "__main__":
     unittest.main()
