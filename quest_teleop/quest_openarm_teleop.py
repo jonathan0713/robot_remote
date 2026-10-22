@@ -11,7 +11,9 @@ Isaac's /joint_command. Arms that are not driven get no command at all (the left
 Per hand: hold SQUEEZE to move that arm, release to freeze it. TRIGGER drives its gripper: --gripper-mode toggle (the
 OpenArm profile's default) closes or opens it on each pull; analog closes it as far as the trigger is pulled, and
 follows only once the trigger has come within --grip-pickup of the current command (no jump on start). Hand motion
-is scaled by --scale / --rot-scale (profile defaults 0.5).
+is scaled by --scale (profile 0.5) and, per controller axis, --rot-scale-axes (profile twist 0.5, nod 0.75, side 1.0;
+an explicit --rot-scale scales every axis alike). Every attempt with --run-dir also saves <run_dir>/teleop_trace.npz
+(per tick: hand pose, target, command, joint command, measured joints) to see where the tool did not follow.
 
 Held-tote chain (--run-dir <run_dir> of run_tote_chain_flow.sh with TOTE_CHAIN_ASSIST=1 TOTE_CHAIN_RECORD=1):
   A or X       start / end the pick capture (one byte on <run_dir>/capture.fifo each)
@@ -47,8 +49,8 @@ from std_msgs.msg import String
 from arm_collision import clearance, link_capsules
 from quest_bridge import NetworkQuest
 from quest_input import QuestController
-from robot_profile import load_profile
-from teleop_core import ArmTeleop, TeleopLimits
+from robot_profile import load_profile, rot_scale_axes
+from teleop_core import ArmTeleop, TeleopLimits, TeleopTrace
 
 HERE = Path(__file__).resolve().parent
 SIDES = ("left", "right")
@@ -95,7 +97,8 @@ class OpenArmTeleop(Node):
                               max_lin_vel=args.max_lin_vel or lim["max_lin_vel"],
                               max_rot_vel_deg=args.max_rot_vel or lim["max_rot_vel_deg"],
                               max_lead_m=lim["max_lead_m"], max_lead_deg=lim["max_lead_deg"],
-                              max_reach=lim["max_reach"], scale=args.scale, rot_scale=args.rot_scale)
+                              max_reach=lim["max_reach"], scale=args.scale, rot_scale=args.rot_scale,
+                              rot_scale_axes=args.rot_scale_axes)
         gain = profile.ik["posture_gain"] if args.posture_gain is None else args.posture_gain
         self.sides = {s: profile.sides[s] for s in SIDES}
         self.arms = {s: ArmTeleop(profile.sides[s].chain, limits, yaw_deg=args.yaw_deg,
@@ -103,6 +106,7 @@ class OpenArmTeleop(Node):
                                   rot_weight=profile.ik["rot_weight"], q_rest=profile.sides[s].rest, posture_gain=gain)
                      for s in args.arms}
         self.q_meas = {s: None for s in SIDES}   # measured joints of both arms (the guard needs the undriven one)
+        self.last_hand = {}                      # newest tracked hand pose per driven arm (teleop trace)
         self.grip_cmd = {s: None for s in args.arms}
         self.grip_meas = {}                             # measured gripper joint of the driven arms
         self.grip_live = {s: False for s in args.arms}  # gripper follows the trigger (after pickup)
@@ -239,6 +243,9 @@ def parse_args(argv=None):
     p.add_argument("--scale", type=float, help="hand -> TCP translation scale (default: profile operator.scale, else 1)")
     p.add_argument("--rot-scale", type=float,
                    help="hand -> tool rotation scale (default: profile operator.rot_scale, else 1)")
+    p.add_argument("--rot-scale-axes", type=float, nargs=3, metavar=("TWIST", "NOD", "SIDE"),
+                   help="rotation scale per controller axis (--rot-frame tool): handle twist, wrist nod, side swing "
+                        "(default: profile operator.rot_scale_axes; an explicit --rot-scale applies to all axes)")
     p.add_argument("--gripper-mode", choices=["toggle", "analog"],
                    help="toggle = each trigger pull closes / opens; analog = trigger depth (default: profile, else analog)")
     p.add_argument("--rate", type=float, default=30.0)
@@ -276,6 +283,8 @@ def parse_args(argv=None):
     for key in ("rate", "min_arm_dist", "link_radius", "tool_radius", "scale", "rot_scale"):
         if getattr(args, key) is not None and (not np.isfinite(getattr(args, key)) or getattr(args, key) <= 0):
             p.error(f"--{key.replace('_', '-')} must be finite and positive")
+    if args.rot_scale_axes is not None and not all(np.isfinite(k) and k > 0 for k in args.rot_scale_axes):
+        p.error("--rot-scale-axes must be finite and positive")
     return args, ros_args
 
 
@@ -312,6 +321,7 @@ def run(node, args, xr):
             rclpy.spin_once(node, timeout_sec=0.1)
     t_start = time.monotonic()
     ended = None
+    trace = TeleopTrace(t_start)
     try:
         while rclpy.ok() and not stop["requested"] and ended is None:
             t0 = time.perf_counter()
@@ -321,6 +331,7 @@ def run(node, args, xr):
             cand = {}
             for side, arm in node.arms.items():
                 ok, pos, quat, squeeze, trigger = readings[hand_of[side]]
+                node.last_hand[side] = (np.asarray(pos, float), np.asarray(quat, float)) if ok else None
                 if ok != tracked[side]:
                     log.info(f"[{side} arm <- {hand_of[side]} hand] " + ("TRACKED" if ok else "tracking LOST"))
                     tracked[side] = ok
@@ -342,6 +353,7 @@ def run(node, args, xr):
                 node.arms[side].q_cmd = q
             for side in node.arms:
                 node.send(side)
+            trace.add(node, tracked, capture.capturing)
             node.state_pub.publish(String(data=json.dumps(
                 {s: ("engaged" if a.engaged else "tracked" if tracked[s] else "lost") for s, a in node.arms.items()}
                 | {"capturing": capture.capturing, "gripper": node.gripper_open_fraction(),
@@ -378,6 +390,7 @@ def run(node, args, xr):
             time.sleep(max(0.0, dt - (time.perf_counter() - t0)))
     finally:
         if args.run_dir is not None:
+            trace.save(args.run_dir / "teleop_trace.npz", log)
             reason = ended or "stopped"
             end_attempt(node, capture, args, reason,
                         discard=not args.no_capture and reason in ("discard", "stopped", "timeout"))
@@ -390,6 +403,8 @@ def main(argv=None):
     profile = load_profile(args.profile)
     defaults = {"scale": 1.0, "rot_scale": 1.0, "gripper_mode": "analog", "min_arm_dist": 0.03,
                 **(profile.operator or {})}
+    if args.rot_scale_axes is None and args.rot_scale is None:  # an explicit --rot-scale scales every axis alike
+        args.rot_scale_axes = rot_scale_axes(defaults)
     for key in ("scale", "rot_scale", "gripper_mode", "min_arm_dist"):
         if getattr(args, key) is None:
             setattr(args, key, defaults[key])
@@ -397,6 +412,10 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, signal.default_int_handler)  # abort during start-up
     node = OpenArmTeleop(args, profile)
     log = node.get_logger()
+    log.info(f"hand -> tool: translation x{args.scale:g}, rotation "
+             + (f"per axis twist / nod / side x{args.rot_scale_axes[0]:g} / {args.rot_scale_axes[1]:g} / "
+                f"{args.rot_scale_axes[2]:g}" if args.rot_scale_axes and args.rot_frame == "tool"
+                else f"x{args.rot_scale:g}") + f" ({args.rot_frame} frame)")
     xr = None
     try:
         node.wait_ready()

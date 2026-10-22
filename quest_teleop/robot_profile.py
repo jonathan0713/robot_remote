@@ -80,3 +80,15 @@ def load_profile(name_or_path) -> RobotProfile:
     return RobotProfile(data["name"], data["robot_type"], urdf_path, data["base_link"], data["state_topic"],
                         data.get("cloudxr_app_name", "QuestTeleop"), dict(data["limits"]), dict(data["ik"]), sides,
                         dict(data.get("operator", {})))
+
+
+def rot_scale_axes(operator: dict) -> tuple | None:
+    """The operator defaults' per-controller-axis rotation scales (twist, nod, side), or None for one rot_scale.
+    Given as {"twist": .., "nod": .., "side": ..} or [twist, nod, side]."""
+    axes = (operator or {}).get("rot_scale_axes")
+    if not axes:
+        return None
+    values = tuple(float(axes[k]) for k in ("twist", "nod", "side")) if isinstance(axes, dict) else tuple(map(float, axes))
+    if len(values) != 3 or not all(np.isfinite(v) and v > 0 for v in values):
+        raise ValueError(f"rot_scale_axes {axes!r}: three finite positive scales (twist, nod, side)")
+    return values

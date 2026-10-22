@@ -15,7 +15,9 @@
     "max_reach": 0.62
   },
   "ik": {"rot_weight": 1.0, "posture_gain": 0.05},
-  "operator": {"scale": 0.5, "rot_scale": 0.5, "gripper_mode": "toggle", "min_arm_dist": 0.01,
+  "operator": {"scale": 0.5, "rot_scale": 0.5, "rot_scale_axes": {"twist": 0.5, "nod": 0.75, "side": 1.0},
+               "rot_scale_axes_note": "2026-10-22, after round r1's first 15 attempts: rotation felt 'sometimes small'. A held controller turns about +-80 deg in forearm twist, +-60 in wrist nod and only +-25 in side swing, so at 0.5 on every axis the side tilt reached about +-12 deg of tool tilt. Per-axis scales on the controller's axes (rot_frame tool); rot_scale stays the base-frame / explicit --rot-scale value.",
+               "gripper_mode": "toggle", "min_arm_dist": 0.01,
                "note": "Operator defaults from the first served held-tote trials (2026-10-21/22): 1:1 hand motion was too sensitive (the right arm knocked the held tote), holding the trigger to keep the gripper closed was hard, and a 3 cm guard held the right arm every time it reached past the left wrist into the tote (campaign v5 demos come within 1.8 cm of the left arm in this capsule model, median closest 4.9 cm, 3/100 below 3 cm). CLI flags override."},
   "sides": {
     "left": {
